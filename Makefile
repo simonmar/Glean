@@ -81,7 +81,7 @@ ifneq ($(MODE),def)
 include mk/mode-$(MODE).mk
 endif
 
-CABAL = $(CABAL_BIN) --jobs --ghc-options='$(EXTRA_GHC_OPTS)' \
+CABAL = $(CABAL_BIN) --ghc-options='$(EXTRA_GHC_OPTS)' \
             -vnormal+nowrap --project-file=$(PWD)/cabal.project \
 			$(CABAL_CONFIG_FLAGS)
 

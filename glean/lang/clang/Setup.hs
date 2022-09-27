@@ -41,7 +41,7 @@ llvmVersions = map mkVersion $ concat
   | a <- versions_a
   ]
 
-  where versions_a = [11, 12]
+  where versions_a = [11, 12, 13]
         versions_b = [0, 1]
         versions_c = [0, 1]
 

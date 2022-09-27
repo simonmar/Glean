@@ -23,7 +23,9 @@ constraints: entropy < 0.4.1.9
 index-state: 2022-12-25T00:00:00Z
 
 package glean
-    flags: -fbthrift
+--    ghc-options: -Werror
+    ghc-options: -j2 +RTS -A32m -n2m -RTS
+    flags: -fbthrift +hack-tests +clang-tests +typescript-tests +go-tests +rust-tests
 
 package thrift-tests
     flags: -fbthrift
