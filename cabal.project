@@ -16,6 +16,8 @@ packages:
 optional-packages:
     hsthrift/folly-clib/folly-clib.cabal
 
+-- import: https://www.stackage.org/lts-21.21/cabal.config
+
 tests: True
 
 -- necessary to use a haskeline <0.8 with GHCs that ship with base >= 4.14
@@ -56,7 +58,20 @@ package fb-util
     flags: +folly
 
 package glean
-    flags: -fbthrift
+    flags: -fbthrift +benchmarks
 
 package thrift-tests
     flags: -fbthrift
+
+program-options
+    ghc-options: -fwrite-ide-info
+
+package glean
+    flags: -hack-tests -rust-tests -typescript-tests -dotnet-tests -python-tests
+
+package glean
+    flags: +clang
+package fb-util
+    flags: +clang
+package folly-clib
+    flags: +clang
