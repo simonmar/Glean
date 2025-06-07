@@ -11,9 +11,14 @@ packages:
     hsthrift/http/thrift-http.cabal
     glean.cabal
     glean/lang/clang/glean-clang.cabal
+--    static-ls/static-ls.cabal
+    tree-sitter-simple/*
+    tasty-expect
 
 optional-packages:
     hsthrift/folly-clib/folly-clib.cabal
+
+import: https://www.stackage.org/lts-21.21/cabal.config
 
 tests: True
 
@@ -32,3 +37,6 @@ package glean
 
 package thrift-tests
     flags: -fbthrift
+
+program-options
+    ghc-options: -fwrite-ide-info

@@ -6,9 +6,11 @@ gen-hs2
 gen-cpp2
 glean.cabal
 glean/hs/Glean/RTS/Bytecode/Gen
+glean/schema/cpp
 glean/schema/hs
 glean/schema/thrift
 glean/schema/v[0-9]*
+glean/lang/clang/schema.h
 glean/lang/java-lsif/tests/cases/xrefs/target
 hsthrift
 dump.lsif

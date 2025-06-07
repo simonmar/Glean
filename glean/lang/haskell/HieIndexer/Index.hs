@@ -96,6 +96,9 @@ import Glean.Util.Range
     Haddock's Interface type has all the ASTs for the declarations
     in addition to the Hie.
 
+- index imports
+  - modules in the export list should be refs
+
 - map Name to exportedness?
 
 - exclude generated names in a cleaner way
