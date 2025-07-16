@@ -801,39 +801,39 @@ instance (Display pref, Display tref) => Display (FieldDef_ st pref tref) where
 
 instance (Display pref, Display tref) =>
     Display (PredicateDef_ s st pref tref) where
-  display opts PredicateDef{..} =
+  display opts predDef =
     hang 2 $ sep $
-      [ "predicate" <+> display opts predicateDefRef <+> ":"
-      , display opts predicateDefKeyType
+      [ "predicate" <+> display opts predDef.predicateDefRef <+> ":"
+      , display opts predDef.predicateDefKeyType
       ] ++
-      (case predicateDefValueType of
+      (case predDef.predicateDefValueType of
          RecordTy [] -> []
-         _other -> [ "->" <+> display opts predicateDefValueType ]) ++
-      (case predicateDefDeriving of
+         _other -> [ "->" <+> display opts predDef.predicateDefValueType ]) ++
+      (case predDef.predicateDefDeriving of
          Derive DerivedAndStored query -> [ "stored", display opts query ]
          Derive _ query -> [ display opts query ]
          _other -> [])
 
 instance (Display pref, Display tref) => Display (TypeDef_ s pref tref) where
-  display opts TypeDef{..} =
+  display opts typeDef =
     hang 2 $ sep
-      [ "type" <+> display opts typeDefRef <+> "="
-      , display opts typeDefType
+      [ "type" <+> display opts typeDef.typeDefRef <+> "="
+      , display opts typeDef.typeDefType
       ]
 
 instance Display SourceSchemas where
-  display opts SourceSchemas{..} = vcat $
-    ("version:" <+> pretty srcAngleVersion)
-    : map (display opts) srcSchemas <> map (display opts) srcEvolves
+  display opts sourceSchemas = vcat $
+    ("version:" <+> pretty sourceSchemas.srcAngleVersion)
+    : map (display opts) sourceSchemas.srcSchemas <> map (display opts) sourceSchemas.srcEvolves
 
 instance Display SourceSchema where
-  display opts SourceSchema{..} = vcat
-    [ "schema" <+> display opts schemaName <>
-        case schemaInherits of
+  display opts sourceSchema = vcat
+    [ "schema" <+> display opts sourceSchema.schemaName <>
+        case sourceSchema.schemaInherits of
           [] -> mempty
-          _ -> " : " <> hcat (punctuate "," (map (display opts) schemaInherits))
+          _ -> " : " <> hcat (punctuate "," (map (display opts) sourceSchema.schemaInherits))
         <> " {"
-    , vcat (map (display opts) schemaDecls)
+    , vcat (map (display opts) sourceSchema.schemaDecls)
     , "}"
     ]
 
@@ -841,9 +841,9 @@ instance Display SourceDecl where
   display opts (SourceImport name _) = "import " <> display opts name
   display opts (SourcePredicate def) = display opts def
   display opts (SourceType def) = display opts def
-  display opts (SourceDeriving DerivingDef{..}) =
+  display opts (SourceDeriving derivingDef) =
     hang 2 $ sep ["derive "
-      <> display opts derivingDefRef, display opts derivingDefDeriveInfo]
+      <> display opts derivingDef.derivingDefRef, display opts derivingDef.derivingDefDeriveInfo]
 
 instance Display q => Display (DerivingInfo q) where
   display _ NoDeriving = mempty
@@ -1043,15 +1043,15 @@ rmLocDecl = \case
   SourceImport name _ -> SourceImport name ()
   SourcePredicate pred -> SourcePredicate $ rmLocPredDef pred
   SourceType typeDef -> SourceType $ rmLocTypeDef typeDef
-  SourceDeriving DerivingDef{..} -> SourceDeriving $ DerivingDef
-    derivingDefRef (rmLocQuery <$> derivingDefDeriveInfo) ()
+  SourceDeriving derivingDef -> SourceDeriving $ DerivingDef
+    derivingDef.derivingDefRef (rmLocQuery <$> derivingDef.derivingDefDeriveInfo) ()
 
 rmLocPredDef :: PredicateDef_ s st p t -> PredicateDef_ () () p t
-rmLocPredDef PredicateDef{..} = PredicateDef {
-  predicateDefRef = predicateDefRef,
-  predicateDefKeyType = rmLocType predicateDefKeyType,
-  predicateDefValueType = rmLocType predicateDefValueType,
-  predicateDefDeriving = rmLocQuery <$> predicateDefDeriving,
+rmLocPredDef predicateDef = PredicateDef {
+  predicateDefRef = predicateDef.predicateDefRef,
+  predicateDefKeyType = rmLocType predicateDef.predicateDefKeyType,
+  predicateDefValueType = rmLocType predicateDef.predicateDefValueType,
+  predicateDefDeriving = rmLocQuery <$> predicateDef.predicateDefDeriving,
   predicateDefSrcSpan = ()
 }
 

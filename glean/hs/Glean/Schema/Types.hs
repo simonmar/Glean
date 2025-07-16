@@ -180,8 +180,8 @@ data ResolvedSchema p t = ResolvedSchema
 type ResolvedSchemaRef = ResolvedSchema PredicateRef TypeRef
 
 schemaRef :: ResolvedSchema p t -> SchemaRef
-schemaRef ResolvedSchema{..} =
-  SchemaRef resolvedSchemaName resolvedSchemaVersion
+schemaRef resolvedSchema =
+  SchemaRef resolvedSchema.resolvedSchemaName resolvedSchema.resolvedSchemaVersion
 
 -- | A set of schemas after name resolution
 data ResolvedSchemas = ResolvedSchemas

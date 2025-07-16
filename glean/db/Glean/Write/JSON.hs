@@ -6,8 +6,6 @@
   LICENSE file in the root directory of this source tree.
 -}
 
-{-# LANGUAGE MultiWayIf #-}
-
 module Glean.Write.JSON
   ( buildJsonBatch
   , syncWriteJsonBatch
@@ -75,10 +73,10 @@ writeJsonBatch
   -> Repo
   -> SendJsonBatch
   -> IO WriteContent
-writeJsonBatch env repo SendJsonBatch{..} = do
+writeJsonBatch env repo batch = do
   dbSchema <- withOpenDatabase env repo (return . Database.odbSchema)
   writeContentFromBatch <$>
-    buildJsonBatch dbSchema sendJsonBatch_options sendJsonBatch_batches
+    buildJsonBatch dbSchema batch.sendJsonBatch_options batch.sendJsonBatch_batches
 
 buildJsonBatch
   :: DbSchema
@@ -87,9 +85,9 @@ buildJsonBatch
   -> IO Batch
 buildJsonBatch dbSchema opts batches =
   withFactBuilder $ \builders ->
-    forM_ batches $ \JsonFactBatch{..} ->
+    forM_ batches $ \batch ->
       writeFacts dbSchema (fromMaybe def opts) builders
-        jsonFactBatch_predicate jsonFactBatch_facts jsonFactBatch_unit
+        batch.jsonFactBatch_predicate batch.jsonFactBatch_facts batch.jsonFactBatch_unit
 
 writeFacts
   :: DbSchema
@@ -99,17 +97,17 @@ writeFacts
   -> [ByteString]  -- ^ The facts to write, in JSON
   -> Maybe ByteString -- ^ The unit that owns the facts, if any
   -> IO ()
-writeFacts dbSchema opts builder@FactBuilder{..} pred factList maybeUnit = do
+writeFacts dbSchema opts builder pred factList maybeUnit = do
   details <- predDetailsForWriting dbSchema pred
-  before <- readIORef nextId
+  before <- readIORef builder.nextId
   mapM_ (writeFact dbSchema opts builder details) factList
-  after <- readIORef nextId
+  after <- readIORef builder.nextId
   forM_ maybeUnit $ \unit ->
     when (after > before) $ do
       -- merge adjacent ranges
       let merge _ (Fid last : rest) | last+1 == before = Fid (after-1) : rest
           merge new old = new ++ old
-      modifyIORef' owned $
+      modifyIORef' builder.owned $
         HashMap.insertWith merge unit [Fid (after-1), Fid before]
 
 predDetailsForWriting :: DbSchema -> PredicateRef -> IO PredicateDetails
@@ -152,7 +150,7 @@ withFactBuilder action =
   nextId <- newIORef firstAnonId
   idsRef <- newIORef []
   owned <- newIORef HashMap.empty
-  action FactBuilder{..}
+  action FactBuilder{facts, nextId, idsRef, owned}
   mem <- finishBuilder facts
   ids <- readIORef idsRef
   ownerMap <- readIORef owned
@@ -178,20 +176,20 @@ namedFact :: Fid -> Pid -> Builder -> CSize -> WriteFacts Fid
 namedFact fid pid clause key_size = do
   when (fromFid fid >= firstAnonId) $
     liftIO $ throwIO $ Thrift.Exception $ "id too high: " <> showt (fromFid fid)
-  FactBuilder{..} <- ask
-  writeBatchFact facts pid clause key_size
-  id <- liftIO $ readIORef nextId
-  liftIO $ writeIORef nextId $! id+1
-  liftIO $ modifyIORef' idsRef (fid:)
+  builder <- ask
+  writeBatchFact builder.facts pid clause key_size
+  id <- liftIO $ readIORef builder.nextId
+  liftIO $ writeIORef builder.nextId $! id+1
+  liftIO $ modifyIORef' builder.idsRef (fid:)
   return (Fid id)
 
 anonFact :: Pid -> Builder -> CSize -> WriteFacts Fid
 anonFact pid clause key_size = do
-  FactBuilder{..} <- ask
-  writeBatchFact facts pid clause key_size
-  id <- liftIO $ readIORef nextId
-  liftIO $ writeIORef nextId $! id+1
-  liftIO $ modifyIORef' idsRef (Fid Thrift.iNVALID_ID :)
+  builder <- ask
+  writeBatchFact builder.facts pid clause key_size
+  id <- liftIO $ readIORef builder.nextId
+  liftIO $ writeIORef builder.nextId $! id+1
+  liftIO $ modifyIORef' builder.idsRef (Fid Thrift.iNVALID_ID :)
      -- Thrift.iNVALID_ID: this tells the fact renamer that this Id
      -- maps to itself. This is so that we avoid needing to construct
      -- a mapping with all the Ids for anonymous facts.
@@ -209,12 +207,12 @@ writeJsonFact
   -> WriteFacts ()
 writeJsonFact
     dbSchema
-    Thrift.SendJsonBatchOptions{..}
+    opts
     details json =
   wrapJsonContextM json $ void $ factToTerm details json
   where
 
-  factToTerm PredicateDetails{..} json@(J.Object obj) = do
+  factToTerm details json@(J.Object obj) = do
     r <- lift $ J.field obj "id"
     case r of
       Just (J.Int id)
@@ -236,11 +234,11 @@ writeJsonFact
         when (J.arity obj /= id_arity + if isJust val then 2 else 1) $
           badFact json
         withBuilder $ \clause -> do
-          jsonToTerm clause predicateKeyType key
+          jsonToTerm clause details.predicateKeyType key
           key_size <- liftIO $ sizeOfBuilder clause
           forM_ val $ \v ->
-            jsonToTerm clause predicateValueType v
-          create predicatePid clause key_size
+            jsonToTerm clause details.predicateValueType v
+          create details.predicatePid clause key_size
   factToTerm _ json = badFact json
 
   wrapJsonContextM :: J.Value -> WriteFacts a -> WriteFacts a
@@ -292,7 +290,7 @@ writeJsonFact
     (StringTy, J.String (J.ByteStringRef p n)) ->
       lift $ invoke $ glean_push_value_string b (castPtr p) n
     (ArrayTy ByteTy, J.String (J.ByteStringRef p n))
-      | sendJsonBatchOptions_no_base64_binary -> lift $ do
+      | opts.sendJsonBatchOptions_no_base64_binary -> lift $ do
           invoke $ glean_push_value_array b n
           invoke $ glean_push_value_bytes b (castPtr p) n
       | otherwise -> lift $ do
@@ -309,7 +307,7 @@ writeJsonFact
         jsonToTerm b ty x
     (SetTy byteTy, J.String (J.ByteStringRef p n))
       | ByteTy == repType byteTy -> if
-        | sendJsonBatchOptions_no_base64_binary ->
+        | opts.sendJsonBatchOptions_no_base64_binary ->
           withWordRtsSet $ \rtsset ->
             lift $ do
             insertBytesRtsSet rtsset p n

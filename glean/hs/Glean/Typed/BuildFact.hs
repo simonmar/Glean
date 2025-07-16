@@ -115,10 +115,10 @@ newFacts ps start =
 
 -- | Serialize the facts into a batch which can be sent via Thrift.
 serializeFacts :: Facts -> IO Thrift.Batch
-serializeFacts Facts{..} = do
-  batch <- FactSet.serialize factsData
-  ownership <- readIORef factsOwnership
-  derivations <- readIORef factsDerivations
+serializeFacts facts = do
+  batch <- FactSet.serialize facts.factsData
+  ownership <- readIORef facts.factsOwnership
+  derivations <- readIORef facts.factsDerivations
   return batch
     { Thrift.batch_owned = fmap Vector.fromList ownership
     , Thrift.batch_dependencies = HashMap.fromList
@@ -159,24 +159,24 @@ instance NewFact FactsM where
         key_size
       where
         mk :: Predicate p => Facts -> (PidOf p -> f (IdOf p)) -> f (IdOf p)
-        mk facts f = f $ getPid $ factsPredicates facts
+        mk facts f = f $ getPid $ facts.factsPredicates
 
   withUnit unit build = FactsM $ do
-    Facts{..} <- ask
-    firstId <- liftIO $ firstFreeId factsData
+    facts <- ask
+    firstId <- liftIO $ firstFreeId facts.factsData
     a <- runFactsM build
-    lastId <- liftIO $ firstFreeId factsData
+    lastId <- liftIO $ firstFreeId facts.factsData
     when (lastId > firstId) $ liftIO $
-      modifyIORef' factsOwnership $
+      modifyIORef' facts.factsOwnership $
         HashMap.insertWith (++) unit
           [fromFid firstId, fromFid lastId - 1]
     return a
 
   derivedFrom :: forall p. Predicate p => [Fid] -> [p] -> FactsM ()
   derivedFrom deps facts = FactsM $ do
-    Facts{..} <- ask
-    let pid = pidOf (getPid factsPredicates :: PidOf p)
-    liftIO $ modifyIORef' factsDerivations $
+    factsEnv <- ask
+    let pid = pidOf (getPid factsEnv.factsPredicates :: PidOf p)
+    liftIO $ modifyIORef' factsEnv.factsDerivations $
         HashMap.insertWith (<>) pid [(deps, map (idOf . getId) facts)]
 
 -- | A fact builder

@@ -116,9 +116,9 @@ data VisiblePredicates p = VisiblePredicates
   }
 
 visiblePredicates :: ResolvedSchemaRef -> VisiblePredicates PredicateRef
-visiblePredicates ResolvedSchema{..} = VisiblePredicates
-  { visibleDefined = evolvable resolvedSchemaPredicates
-  , visibleReexported = evolvable resolvedSchemaReExportedPredicates
+visiblePredicates resolvedSchema = VisiblePredicates
+  { visibleDefined = evolvable resolvedSchema.resolvedSchemaPredicates
+  , visibleReexported = evolvable resolvedSchema.resolvedSchemaReExportedPredicates
   }
   where
   evolvable :: HashMap PredicateRef ResolvedPredicateDef -> HashSet PredicateRef
@@ -126,7 +126,7 @@ visiblePredicates ResolvedSchema{..} = VisiblePredicates
 
   stored ref =
     maybe True (canBeStored . derivingDefDeriveInfo) $
-      HashMap.lookup ref resolvedSchemaDeriving
+      HashMap.lookup ref resolvedSchema.resolvedSchemaDeriving
 
 canBeStored :: DerivingInfo a -> Bool
 canBeStored = \case

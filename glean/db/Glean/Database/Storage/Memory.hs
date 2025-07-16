@@ -113,5 +113,5 @@ instance Storage Memory where
   restore _ repo _ _ = dbError repo "unimplemented 'restore'"
 
 instance CanLookup (Database Memory) where
-  lookupName Database{..} = "memory:" <> repoToText dbRepo
+  lookupName db = "memory:" <> repoToText db.dbRepo
   withLookup = withLookup . dbFacts

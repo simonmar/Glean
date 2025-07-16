@@ -86,9 +86,9 @@ instance Backend Database.Env where
       index <- Observed.get (Database.envSchemaSource env)
       Database.getSchemaInfo (Database.odbSchema odb) index req
 
-  getSchemaInfo env Nothing Thrift.GetSchemaInfo{..} = do
+  getSchemaInfo env Nothing req = do
       index <- Observed.get (Database.envSchemaSource env)
-      sid <- case getSchemaInfo_select of
+      sid <- case req.getSchemaInfo_select of
           Thrift.SelectSchema_schema_id sid -> return sid
           other -> throwIO $ userError $ "unsupported: " <> show other
       Database.getSchemaInfoForSchema index sid (envDebug env)
@@ -114,7 +114,7 @@ instance Backend Database.Env where
       }
     | otherwise = UserQuery.userQuery env repo q
 
-  userQueryBatch env repo Thrift.UserQueryBatch{..} = do
+  userQueryBatch env repo batch = do
       resultsRef <- newIORef mempty
       numCaps <- getNumCapabilities
       stream numCaps (forM_ queries) $ \q -> do
@@ -125,15 +125,15 @@ instance Backend Database.Env where
       where
         queries =
           [ Thrift.UserQuery
-            { userQuery_predicate = userQueryBatch_predicate
-            , userQuery_predicate_version = userQueryBatch_predicate_version
-            , userQuery_encodings  = userQueryBatch_encodings
-            , userQuery_client_info = userQueryBatch_client_info
-            , userQuery_schema_id = userQueryBatch_schema_id <|> schemaId env
-            , userQuery_options = userQueryBatch_options
+            { userQuery_predicate = batch.userQueryBatch_predicate
+            , userQuery_predicate_version = batch.userQueryBatch_predicate_version
+            , userQuery_encodings  = batch.userQueryBatch_encodings
+            , userQuery_client_info = batch.userQueryBatch_client_info
+            , userQuery_schema_id = batch.userQueryBatch_schema_id <|> schemaId env
+            , userQuery_options = batch.userQueryBatch_options
             , userQuery_query = q
             }
-          | q <- userQueryBatch_queries
+          | q <- batch.userQueryBatch_queries
           ]
         runOne query =
           (Thrift.UserQueryResultsOrException_results
@@ -179,9 +179,9 @@ instance Backend Database.Env where
   displayBackend _ = "(local backend)"
 
   hasDatabase env repo = do
-    Thrift.GetDatabaseResult { getDatabaseResult_database = Thrift.Database{..}}
+    Thrift.GetDatabaseResult { getDatabaseResult_database = db}
       <- getDatabase env repo
-    return $ case database_status of
+    return $ case db.database_status of
       Thrift.DatabaseStatus_Restorable -> False
       _ -> True
 

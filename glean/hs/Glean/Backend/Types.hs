@@ -440,12 +440,12 @@ dbShard :: Thrift.Repo -> DbShard
 dbShard = Text.pack . show . dbShardWord
 
 dbShardWord :: Thrift.Repo -> Word64
-dbShardWord Thrift.Repo{..} =
-  unsafeDupablePerformIO $ B.unsafeUseAsCStringLen repo $ \(ptr,len) -> do
+dbShardWord repo =
+  unsafeDupablePerformIO $ B.unsafeUseAsCStringLen repoTxt $ \(ptr,len) -> do
       -- Use GHC's md5 binding. If this ever changes then the test in
       -- hs/tests/TestShard.hs will detect it.
     Fingerprint w _ <- fingerprintData (castPtr ptr) len
     return (w `shiftR` 1)
        -- SR doesn't like shards >= 0x8000000000000000
   where
-  repo = Text.encodeUtf8 repo_name <> "/" <> Text.encodeUtf8 repo_hash
+  repoTxt = Text.encodeUtf8 repo.repo_name <> "/" <> Text.encodeUtf8 repo.repo_hash

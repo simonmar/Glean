@@ -98,29 +98,29 @@ executeCompiled
   -> QueryRuntimeOptions
   -> IO QueryResults
 executeCompiled inventory ownership facts
-    CompiledQuery{..} QueryRuntimeOptions{..} =
+    compiledQuery queryOptions =
   withDefine facts $ \facts_ptr ->
   with inventory $ \inventory_ptr ->
-  with compiledQuerySub $ \sub_ptr ->
+  with compiledQuery.compiledQuerySub $ \sub_ptr ->
   maybe ($ nullPtr) with ownership $ \ownership_ptr ->
   let
-    maxr = fromIntegral (fromMaybe 0 queryMaxResults)
-    maxb = fromIntegral (fromMaybe 0 queryMaxBytes)
-    maxt = fromIntegral (fromMaybe 0 queryMaxTimeMs)
-    maxs = fromIntegral (fromMaybe 0 queryMaxSetSize)
-    withTraversal = case compiledQueryResultTraversal of
+    maxr = fromIntegral (fromMaybe 0 queryOptions.queryMaxResults)
+    maxb = fromIntegral (fromMaybe 0 queryOptions.queryMaxBytes)
+    maxt = fromIntegral (fromMaybe 0 queryOptions.queryMaxTimeMs)
+    maxs = fromIntegral (fromMaybe 0 queryOptions.queryMaxSetSize)
+    withTraversal = case compiledQuery.compiledQueryResultTraversal of
        Nothing -> ($ nullPtr)
        Just sub -> with sub
   in
   withTraversal $ \traversal_ptr ->
-  withDepth queryDepth $ \(depth, expand_pids, num_expand_pids) ->
+  withDepth queryOptions.queryDepth $ \(depth, expand_pids, num_expand_pids) ->
   using
     (invoke $ \presults -> glean_query_execute_compiled
       inventory_ptr
       facts_ptr
       ownership_ptr
       sub_ptr
-      (maybe 0 (fromIntegral . fromPid) compiledQueryResultPid)
+      (maybe 0 (fromIntegral . fromPid) compiledQuery.compiledQueryResultPid)
       traversal_ptr
       maxr
       maxb
@@ -129,9 +129,9 @@ executeCompiled inventory ownership facts
       depth
       expand_pids
       num_expand_pids
-      (if queryWantStats then 1 else 0)
+      (if queryOptions.queryWantStats then 1 else 0)
       presults)
-    (unpackResults queryWantStats compiledQueryResultPid)
+    (unpackResults queryOptions.queryWantStats compiledQuery.compiledQueryResultPid)
 
 restartCompiled
   :: CanDefine a
@@ -143,18 +143,18 @@ restartCompiled
   -> ByteString   -- serialized thrift::internal::QueryCont
   -> IO QueryResults
 restartCompiled inventory ownership facts pid
-    QueryRuntimeOptions{..} serializedCont =
+    queryOptions serializedCont =
   withDefine facts $ \facts_ptr ->
   with inventory $ \inventory_ptr ->
   unsafeWithBytes serializedCont $ \cont_ptr cont_size ->
   maybe ($ nullPtr) with ownership $ \ownership_ptr ->
   let
-    maxr = fromIntegral (fromMaybe 0 queryMaxResults)
-    maxb = fromIntegral (fromMaybe 0 queryMaxBytes)
-    maxt = fromIntegral (fromMaybe 0 queryMaxTimeMs)
-    maxs = fromIntegral (fromMaybe 0 queryMaxSetSize)
+    maxr = fromIntegral (fromMaybe 0 queryOptions.queryMaxResults)
+    maxb = fromIntegral (fromMaybe 0 queryOptions.queryMaxBytes)
+    maxt = fromIntegral (fromMaybe 0 queryOptions.queryMaxTimeMs)
+    maxs = fromIntegral (fromMaybe 0 queryOptions.queryMaxSetSize)
   in
-  withDepth queryDepth $ \(depth, expand_pids, num_expand_pids) ->
+  withDepth queryOptions.queryDepth $ \(depth, expand_pids, num_expand_pids) ->
   using
     (invoke $ \presults -> glean_query_restart_compiled
       inventory_ptr
@@ -169,9 +169,9 @@ restartCompiled inventory ownership facts pid
       depth
       expand_pids
       num_expand_pids
-      (if queryWantStats then 1 else 0)
+      (if queryOptions.queryWantStats then 1 else 0)
       presults)
-    (unpackResults queryWantStats pid)
+    (unpackResults queryOptions.queryWantStats pid)
 
 withDepth :: Depth -> ((Word64, Ptr Word64, Word64) -> IO a) -> IO a
 withDepth depth f = case depth of

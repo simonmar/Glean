@@ -65,7 +65,7 @@ instance ConfigProvider ConfigAPI where
       <> help ("directory where the config files can be found " <>
         "(default: $HOME/.config/glean)")
       )
-    return LocalConfigOptions{..}
+    return LocalConfigOptions { configDir = configDir }
 
   defaultConfigOptions = LocalConfigOptions { configDir = Nothing }
 
@@ -76,11 +76,11 @@ instance ConfigProvider ConfigAPI where
 
   type Subscription ConfigAPI = LocalSubscription
 
-  subscribe cfg@ConfigAPI{..} path updated deserializer = do
+  subscribe cfg path updated deserializer = do
     a <- get cfg path deserializer
     updated a
-    dir <- getDir opts
-    modifyMVar_ subscriptions $ \hm -> do
+    dir <- getDir cfg.opts
+    modifyMVar_ cfg.subscriptions $ \hm -> do
       let
         changed contents =
           deserialize path deserializer contents >>= updated
@@ -89,8 +89,8 @@ instance ConfigProvider ConfigAPI where
           return $ HashMap.insert path (watch, changed:others) hm
         Nothing -> do
           let file = BC.pack $ dir </> Text.unpack path
-          watch <- addWatch inotify [Modify,MoveIn,Create] file $ \_events -> do
-            callbacks <- withMVar subscriptions $ \hm -> do
+          watch <- addWatch cfg.inotify [Modify,MoveIn,Create] file $ \_events -> do
+            callbacks <- withMVar cfg.subscriptions $ \hm -> do
               case HashMap.lookup path hm of
                 Nothing -> return []
                 Just (_, callbacks) -> return callbacks
@@ -102,8 +102,8 @@ instance ConfigProvider ConfigAPI where
 
   cancel _ _ = return () -- unimplemented for now
 
-  get ConfigAPI{..} path deserializer = do
-    dir <- getDir opts
+  get cfg path deserializer = do
+    dir <- getDir cfg.opts
     contents <- ByteString.readFile (dir </> Text.unpack path)
       `catch` \e ->
         if isDoesNotExistError e

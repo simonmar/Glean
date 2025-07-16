@@ -88,36 +88,36 @@ withOpenDatabaseStorage
   -> Repo
   -> (forall s . Storage s => s -> OpenDB s -> IO a)
   -> IO a
-withOpenDatabaseStorage env@Env{..} repo action =
-  withActiveDatabase env repo $ \storage db@DB{..} -> do
+withOpenDatabaseStorage env repo action =
+  withActiveDatabase env repo $ \storage db -> do
     odb <- mask $ \restore -> do
       r <- atomically $ do
-        state <- readTVar dbState
+        state <- readTVar db.dbState
         case state of
           Opening -> retry
           Open odb -> return $ Left odb
           Closing -> retry
           Closed -> do
-            meta <- Catalog.readMeta envCatalog dbRepo
+            meta <- Catalog.readMeta env.envCatalog db.dbRepo
             let version = Thrift.metaVersion meta
                 mode
-                  | envReadOnly = ReadOnly
+                  | env.envReadOnly = ReadOnly
                   | Thrift.Complete{} <- completeness = ReadOnly
                   | otherwise = ReadWrite
                     -- Note: Finalizing also needs to be ReadWrite,
                     -- because compaction modifies the DB.
                   where completeness = metaCompleteness meta
-            when (not $ canOpenVersion mode version) $ dbError dbRepo
+            when (not $ canOpenVersion mode version) $ dbError db.dbRepo
               $ "can't open database version " ++ show (unDBVersion version)
-            writeTVar dbState Opening
+            writeTVar db.dbState Opening
             return $ Right (version, mode)
       case r of
         Left odb -> return odb
         Right (version, mode) -> do
           deps <- atomically $ metaDependencies <$>
-            Catalog.readMeta envCatalog dbRepo
+            Catalog.readMeta env.envCatalog db.dbRepo
           let
-            onFailure ex = atomically $ Catalog.dbFailed envCatalog dbRepo ex
+            onFailure ex = atomically $ Catalog.dbFailed env.envCatalog db.dbRepo ex
           -- opening a DB has long uninterruptible sections so do it on a
           -- separate thread in case we get cancelled
           opener <-
@@ -138,24 +138,24 @@ withOpenDatabaseStack env repo action = do
   mapM (\repo -> withOpenDatabase env repo action) (repo : parents)
 
 repoParents :: Env -> Repo -> IO [Repo]
-repoParents Env{..} repo = go repo
+repoParents env repo = go repo
   where
   go repo = do
-    deps <- atomically $ metaDependencies <$> Catalog.readMeta envCatalog repo
+    deps <- atomically $ metaDependencies <$> Catalog.readMeta env.envCatalog repo
     case deps of
       Nothing -> return []
       Just dep -> (parent :) <$> go parent
         where parent = depParent dep
 
 repoParent :: Env -> Repo -> IO (Maybe Repo)
-repoParent Env{..} repo = do
-  deps <- atomically $ metaDependencies <$> Catalog.readMeta envCatalog repo
+repoParent env repo = do
+  deps <- atomically $ metaDependencies <$> Catalog.readMeta env.envCatalog repo
   return (fmap depParent deps)
 
 depParent :: Thrift.Dependencies -> Repo
 depParent deps = case deps of
-  Thrift.Dependencies_pruned Thrift.Pruned{..} -> pruned_base
-  Thrift.Dependencies_stacked Thrift.Stacked{..} -> Thrift.Repo stacked_name stacked_hash
+  Thrift.Dependencies_pruned pruned -> pruned.pruned_base
+  Thrift.Dependencies_stacked stacked -> Thrift.Repo stacked.stacked_name stacked.stacked_hash
 
 withOpenDBLookup
   :: Storage s
@@ -164,20 +164,20 @@ withOpenDBLookup
   -> OpenDB s
   -> (Boundaries -> Lookup -> IO a)
   -> IO a
-withOpenDBLookup env repo OpenDB{ odbBaseSlices = baseSlices, .. } f =
-  Lookup.withCanLookup odbHandle $ \lookup -> do
+withOpenDBLookup env repo odb f =
+  Lookup.withCanLookup odb.odbHandle $ \lookup -> do
   parent <- repoParent env repo
   case parent of
     Nothing -> do
       bounds <- flatBoundaries lookup
       f bounds lookup
     Just baseRepo ->
-      withOpenDatabase env baseRepo $ \OpenDB{..} -> do
+      withOpenDatabase env baseRepo $ \baseOdb -> do
         -- stacked (sliced base lookup)
-        Lookup.withCanLookup odbHandle $ \baseLookup -> do
+        Lookup.withCanLookup baseOdb.odbHandle $ \baseLookup -> do
           withOpenDBStack env baseRepo baseLookup $ \base -> do
             bounds <- stackedBoundaries base lookup
-            let slices = catMaybes baseSlices
+            let slices = catMaybes odb.odbBaseSlices
             if null slices
               then Lookup.withCanLookup (Stacked.stacked base lookup)
                 (f bounds)
@@ -198,15 +198,15 @@ withOpenDBStack env repo lookup f = do
   case parent of
     Nothing -> f lookup
     Just baseRepo ->
-      withOpenDatabase env baseRepo $ \OpenDB{..} ->
-        Lookup.withCanLookup odbHandle $ \baseLookup ->
+      withOpenDatabase env baseRepo $ \baseOdb ->
+        Lookup.withCanLookup baseOdb.odbHandle $ \baseLookup ->
         withOpenDBStack env baseRepo baseLookup $ \base -> do
           Lookup.withCanLookup (Stacked.stacked base lookup) f
 
 withWritableDatabase :: Env -> Repo -> ((WriteQueue, DbSchema) -> IO a) -> IO a
 withWritableDatabase env repo action =
-  withOpenDatabase env repo $ \OpenDB{..} -> case odbWriting of
-    Just Writing{..} -> action (wrQueue, odbSchema)
+  withOpenDatabase env repo $ \odb -> case odb.odbWriting of
+    Just writing -> action (writing.wrQueue, odb.odbSchema)
     Nothing -> dbError repo "can't write to a read-only database"
 
 readDatabase
@@ -242,17 +242,17 @@ releaseDB
   -> TVar (HashMap Thrift.Repo (DB storage))
   -> DB s
   -> STM ()
-releaseDB catalog active DB{..} = do
-  users <- readTVar dbUsers
-  writeTVar dbUsers $! users - 1
+releaseDB catalog active db = do
+  users <- readTVar db.dbUsers
+  writeTVar db.dbUsers $! users - 1
   when (users == 1) $ do
-    state <- readTVar dbState
+    state <- readTVar db.dbState
     case state of
       Closed -> do
-        meta <- try $ Catalog.readMeta catalog dbRepo
+        meta <- try $ Catalog.readMeta catalog db.dbRepo
         case meta :: Either SomeException Meta of
           Right Meta{metaCompleteness = Thrift.Incomplete{}} -> return ()
-          _ -> modifyTVar' active $ HashMap.delete dbRepo
+          _ -> modifyTVar' active $ HashMap.delete db.dbRepo
       _ -> return ()
 
 withActiveDatabase
@@ -261,72 +261,72 @@ withActiveDatabase
   -> Repo
   -> (forall s . Storage s => s -> DB s -> IO a)
   -> IO a
-withActiveDatabase Env{..} repo act = bracket
+withActiveDatabase env repo act = bracket
   (atomically $ do
-    r <- HashMap.lookup repo <$> readTVar envActive
+    r <- HashMap.lookup repo <$> readTVar env.envActive
     db <- case r of
       Just db -> return db
       Nothing -> do
-        exists <- Catalog.exists envCatalog [Local] repo
+        exists <- Catalog.exists env.envCatalog [Local] repo
         when (not exists) $ CallStack.throwSTM $ Thrift.UnknownDatabase repo
         deleting <- HashMap.member repo <$> readTVar envDeleting
         -- TODO: different error?
         when deleting $ CallStack.throwSTM $ Thrift.UnknownDatabase repo
         db <- newDB repo
-        modifyTVar' envActive $ HashMap.insert repo db
+        modifyTVar' env.envActive $ HashMap.insert repo db
         return db
     acquireDB db
     return db)
-  (atomically . releaseDB envCatalog envActive)
-  (\db -> act envStorage db)
+  (atomically . releaseDB env.envCatalog env.envActive)
+  (\db -> act env.envStorage db)
 
 usingActiveDatabase
   :: Env
   -> Repo
   -> (forall s. Storage s => Maybe (DB s) -> IO a)
   -> IO a
-usingActiveDatabase Env{..} repo = bracket
+usingActiveDatabase env repo = bracket
   (atomically $ do
-    r <- HashMap.lookup repo <$> readTVar envActive
+    r <- HashMap.lookup repo <$> readTVar env.envActive
     mapM_ acquireDB r
     return r)
-  (atomically . mapM_ (releaseDB envCatalog envActive))
+  (atomically . mapM_ (releaseDB env.envCatalog env.envActive))
 
 withMaybeActiveDatabase
   :: Env
   -> Repo
   -> (forall s . Storage s => Maybe (DB s) -> STM a)
   -> STM a
-withMaybeActiveDatabase Env{..} repo fn = do
-  active <- readTVar envActive
+withMaybeActiveDatabase env repo fn = do
+  active <- readTVar env.envActive
   fn (HashMap.lookup repo active)
 
 updateLookupCacheStats :: Env -> IO ()
 updateLookupCacheStats env =
-  Stats.bump (envStats env) Stats.lookupCacheStats
-  =<< LookupCache.readStatsAndResetCounters (envLookupCacheStats env)
+  Stats.bump (env.envStats) Stats.lookupCacheStats
+  =<< LookupCache.readStatsAndResetCounters (env.envLookupCacheStats)
 
 setupSchema :: Storage s => Env -> Repo -> Database s -> Mode -> IO DbSchema
-setupSchema Env{..} _ handle (Create _ _ initial) = do
-  schema <- Observed.get envSchemaSource
+setupSchema env _ handle (Create _ _ initial) = do
+  schema <- Observed.get env.envSchemaSource
   dbSchema <- case initial of
     UseDefaultSchema ->
-      newDbSchema (Just envDbSchemaCache) schema
-        LatestSchema readWriteContent envDebug
+      newDbSchema (Just env.envDbSchemaCache) schema
+        LatestSchema readWriteContent env.envDebug
     UseSpecificSchema schemaId ->
-      newDbSchema (Just envDbSchemaCache) schema
-        (SpecificSchemaId schemaId) readWriteContent envDebug
+      newDbSchema (Just env.envDbSchemaCache) schema
+        (SpecificSchemaId schemaId) readWriteContent env.envDebug
     UseThisSchema info ->
-      fromStoredSchema (Just envDbSchemaCache) info readWriteContent envDebug
+      fromStoredSchema (Just env.envDbSchemaCache) info readWriteContent env.envDebug
   storeSchema handle $ toStoredSchema dbSchema
   return dbSchema
-setupSchema env@Env{..} repo handle mode = do
+setupSchema env repo handle mode = do
   stored <- retrieveSchema repo handle
   case stored of
     Just info
       | ReadOnly <- mode -> mergeSchema
       | otherwise ->
-        fromStoredSchema (Just envDbSchemaCache) info readWriteContent envDebug
+        fromStoredSchema (Just env.envDbSchemaCache) info readWriteContent env.envDebug
           -- while writing, we don't allow new predicates to be added to
           -- the schema. This is the easiest way to prevent facts being
           -- added to the DB that aren't in the original stored schema.
@@ -337,8 +337,8 @@ setupSchema env@Env{..} repo handle mode = do
       stackStats = do
         parents <- repoParents env repo
         statss <- forM parents $ \repo ->
-          withOpenDatabase env repo $ \OpenDB{..} ->
-            Storage.predicateStats odbHandle
+          withOpenDatabase env repo $ \odb ->
+            Storage.predicateStats odb.odbHandle
         stats <- Storage.predicateStats handle
         return $ HashMap.fromListWith (<>) $ concat (stats : statss)
 
@@ -346,12 +346,12 @@ setupSchema env@Env{..} repo handle mode = do
         -- merge the schema in the DB with the current schema, so
         -- that we can query for derived predicates that weren't
         -- stored in the DB when it was created.
-        schema <- Observed.get envSchemaSource
+        schema <- Observed.get env.envSchemaSource
         stats <- stackStats
-        newMergedDbSchema (Just envDbSchemaCache) info schema
-          (readOnlyContent stats) envDebug
+        newMergedDbSchema (Just env.envDbSchemaCache) info schema
+          (readOnlyContent stats) env.envDebug
     Nothing -> do
-      meta <- atomically $ Catalog.readMeta envCatalog repo
+      meta <- atomically $ Catalog.readMeta env.envCatalog repo
       let failure = case metaCompleteness meta of
             Thrift.Broken (Thrift.DatabaseBroken task reason) ->
               Text.unpack $ Text.unwords $
@@ -377,75 +377,75 @@ schemaUpdated
        -- ^ Just repo => only update the schema for this repo,
        -- otherwise update all of them.
   -> IO ()
-schemaUpdated env@Env{..} mbRepo = do
+schemaUpdated env mbRepo = do
   let
     just = case mbRepo of
       Nothing -> HashMap.elems
       Just repo -> maybeToList . HashMap.lookup repo
     acquire = atomically $ do
-      active <- just <$> readTVar envActive
+      active <- just <$> readTVar env.envActive
       mapM_ acquireDB active
       return active
-    release = atomically . mapM_ (releaseDB envCatalog envActive)
+    release = atomically . mapM_ (releaseDB env.envCatalog env.envActive)
 
   -- Empty the DbSchema cache. We probably have a new SchemaIndex now
   -- which invalidates all the entries anyway, and also we don't prune
   -- this cache anywhere else.
   when (isNothing mbRepo) $ do
-    modifyMVar_ envDbSchemaCache $ \_ -> return HashMap.empty
+    modifyMVar_ env.envDbSchemaCache $ \_ -> return HashMap.empty
     -- previously failed DBs might now open successfully
-    atomically $ Catalog.resetFailed envCatalog
+    atomically $ Catalog.resetFailed env.envCatalog
 
   bracket acquire release $ \active -> do
-    forM_ active $ \DB{..} -> do
+    forM_ active $ \db -> do
       maybeOpenDB <- atomically $ do
-        state <- readTVar dbState
+        state <- readTVar db.dbState
         case state of
           Opening -> retry
           Open odb -> return $ Just odb
           Closing -> return Nothing
           Closed -> return Nothing
-      forM_ maybeOpenDB $ \OpenDB{..} -> do
-        case odbWriting of
+      forM_ maybeOpenDB $ \odb -> do
+        case odb.odbWriting of
           Just{} -> do
             logInfo $ "not updating schema for writable DB: " <>
-              showRepo dbRepo
+              showRepo db.dbRepo
             return ()
             -- see setupSchema above, we don't update the schema for
             -- a writable DB.
           Nothing -> do
-            logInfo $ "updating schema for: " <> showRepo dbRepo
+            logInfo $ "updating schema for: " <> showRepo db.dbRepo
             r <- tryAll $
               loggingAction
-                (runLogRepo "update-schema" env dbRepo) (const mempty) $
-                  setupSchema env dbRepo odbHandle ReadOnly
+                (runLogRepo "update-schema" env db.dbRepo) (const mempty) $
+                  setupSchema env db.dbRepo odb.odbHandle ReadOnly
             case r of
-              Left err -> logError $ "schema update for " <> showRepo dbRepo <>
+              Left err -> logError $ "schema update for " <> showRepo db.dbRepo <>
                 " failed: " <> show err
               Right schema -> atomically $ do
-                state <- readTVar dbState
+                state <- readTVar db.dbState
                 case state of
                   Opening -> return ()
                    -- if we are Opening now, this must have happened
                    -- after the transaction above, so it will already
                    -- pick up the new schema.
                   Open odb ->
-                    writeTVar dbState $ Open odb { odbSchema = schema }
+                    writeTVar db.dbState $ Open odb { odbSchema = schema }
                   Closing -> return ()
                   Closed -> return ()
   logInfo "done updating schema for open DBs"
 
 
 setupWriting :: Lookup.CanLookup lookup => Env -> lookup -> IO Writing
-setupWriting Env{..} lookup = do
-  scfg <- Observed.get envServerConfig
+setupWriting env lookup = do
+  scfg <- Observed.get env.envServerConfig
   -- Convert to Word64 from Int32 to prevent silent truncation.
   let cache_limit_mb :: Word64 = fromIntegral $
         ServerConfig.config_db_lookup_cache_limit_mb scfg
   lookupCache <- LookupCache.new
     (fromIntegral$ cache_limit_mb * 1024 * 1024)
     (fromIntegral $ ServerConfig.config_db_writer_threads scfg)
-    envLookupCacheStats
+    env.envLookupCacheStats
   next_id <- newIORef =<< Lookup.firstFreeId lookup
   mutex <- newMutex (Storage.WriteLock ())
   queue <- WriteQueue <$> newTQueueIO <*> newTVarIO 0 <*> newTVarIO 0
@@ -481,23 +481,23 @@ asyncOpenDB
   -> (SomeException -> IO ())
       -- ^ Action to run on any failure.
   -> IO (Async (OpenDB s))
-asyncOpenDB env@Env{..} storage db@DB{..} version mode deps
+asyncOpenDB env storage db version mode deps
     on_success on_failure =
   -- Be paranoid about 'spawnMask' itself throwing.
-  handling_failures $ Warden.spawnMask envWarden $ \restore ->
-  loggingAction (runLogRepo "open" env dbRepo) (const mempty) $
+  handling_failures $ Warden.spawnMask env.envWarden $ \restore ->
+  loggingAction (runLogRepo "open" env db.dbRepo) (const mempty) $
   bracket_
     (atomically $ acquireDB db)
-    (atomically $ releaseDB envCatalog envActive db) $
+    (atomically $ releaseDB env.envCatalog env.envActive db) $
   handling_failures $ do
-    logInfo $ inRepo dbRepo "opening"
+    logInfo $ inRepo db.dbRepo "opening"
     bracketOnError
-      (Storage.open storage dbRepo mode version)
+      (Storage.open storage db.dbRepo mode version)
       Storage.close
       $ \handle -> do
           odb <- restore $ do
-            logInfo $ inRepo dbRepo "opened"
-            dbSchema <- setupSchema env dbRepo handle mode
+            logInfo $ inRepo db.dbRepo "opened"
+            dbSchema <- setupSchema env db.dbRepo handle mode
             logInfo $ inRepo dbRepo $
               "schema has " ++ show (schemaSize dbSchema) ++ " predicates"
             writing <- case mode of
@@ -506,18 +506,18 @@ asyncOpenDB env@Env{..} storage db@DB{..} version mode deps
             maybeSlices <- case mode of
               Create{} -> do
                 let units = case deps of
-                      Just (Thrift.Dependencies_pruned Thrift.Pruned{..}) ->
-                        pruned_units
+                      Just (Thrift.Dependencies_pruned pruned) ->
+                        pruned.pruned_units
                       _ -> []
                 storeUnits handle units
                 slices <- baseSlices env deps (Just units)
                 storeSlices handle (catMaybes slices)
                 return slices
               _ -> do
-                m <- retrieveSlices dbRepo handle
+                m <- retrieveSlices db.dbRepo handle
                 case m of
                   Nothing -> do
-                    stored_units <- retrieveUnits dbRepo handle
+                    stored_units <- retrieveUnits db.dbRepo handle
                     baseSlices env deps stored_units
                   Just slices -> return $ map Just slices
             idle <- newTVarIO =<< getTimePoint
@@ -531,13 +531,13 @@ asyncOpenDB env@Env{..} storage db@DB{..} version mode deps
               , odbBaseSlices = maybeSlices
               , odbOwnership = ownership
               }
-          atomically $ writeTVar dbState $ Open odb
+          atomically $ writeTVar db.dbState $ Open odb
           return odb
   where
     handling_failures :: IO a -> IO a
     handling_failures = handle $ \exc -> do
-      atomically (writeTVar dbState Closed)
-      logError $ inRepo dbRepo "couldn't open: " ++ show (exc :: SomeException)
+      atomically (writeTVar db.dbState Closed)
+      logError $ inRepo db.dbRepo "couldn't open: " ++ show (exc :: SomeException)
       on_failure exc
       throwIO exc
 
@@ -579,11 +579,11 @@ baseSlices
   -> IO [Maybe Ownership.Slice]
 baseSlices env deps stored_units = case deps of
   Nothing -> return []
-  Just (Thrift.Dependencies_stacked Thrift.Stacked{..}) ->
-    dbSlices (Thrift.Repo stacked_name stacked_hash) Set.empty True
-  Just (Thrift.Dependencies_pruned Thrift.Pruned{..}) -> do
-    let real_units = fromMaybe pruned_units stored_units
-    dbSlices pruned_base (Set.fromList real_units) pruned_exclude
+  Just (Thrift.Dependencies_stacked stacked) ->
+    dbSlices (Thrift.Repo stacked.stacked_name stacked.stacked_hash) Set.empty True
+  Just (Thrift.Dependencies_pruned pruned) -> do
+    let real_units = fromMaybe pruned.pruned_units stored_units
+    dbSlices pruned.pruned_base (Set.fromList real_units) pruned.pruned_exclude
  where
   dbSlices
     :: Repo
@@ -594,11 +594,11 @@ baseSlices env deps stored_units = case deps of
        -- ^ True <=> exclude, False <=> include
     -> IO [Maybe Ownership.Slice]
   dbSlices repo units exclude = do
-    withOpenDatabase env repo $ \OpenDB{..} -> do
+    withOpenDatabase env repo $ \odb -> do
       baseDeps <- atomically $ metaDependencies <$>
-        Catalog.readMeta (envCatalog env) repo
-      baseUnits <- retrieveUnits repo odbHandle
-      rest <- depSlices baseDeps baseUnits units exclude odbBaseSlices
+        Catalog.readMeta (env.envCatalog) repo
+      baseUnits <- retrieveUnits repo odb.odbHandle
+      rest <- depSlices baseDeps baseUnits units exclude odb.odbBaseSlices
       slice <- if exclude && Set.null units
         then return Nothing
         else do
@@ -631,28 +631,28 @@ baseSlices env deps stored_units = case deps of
   depSlices dep dep_units units exclude slices = do
     case dep of
       Nothing -> return []
-      Just (Thrift.Dependencies_stacked Thrift.Stacked{..}) ->
-        dbSlices (Thrift.Repo stacked_name stacked_hash) units exclude
-      Just (Thrift.Dependencies_pruned Thrift.Pruned{..})
+      Just (Thrift.Dependencies_stacked stacked) ->
+        dbSlices (Thrift.Repo stacked.stacked_name stacked.stacked_hash) units exclude
+      Just (Thrift.Dependencies_pruned pruned)
         -- optimisation: check if the slices for the stack will be the
         -- same as the slices we already have for this repo. TODO:
         -- could handle more of the exclude/pruned_exclude combos here
-        | exclude && pruned_exclude,
+        | exclude && pruned.pruned_exclude,
           units `Set.isSubsetOf` depUnits ->
           return slices
         | otherwise ->
-          dbSlices pruned_base newUnits (exclude && pruned_exclude)
+          dbSlices pruned.pruned_base newUnits (exclude && pruned.pruned_exclude)
         where
-        depUnits = Set.fromList $ fromMaybe pruned_units dep_units
+        depUnits = Set.fromList $ fromMaybe pruned.pruned_units dep_units
           -- prefer the units stored in the DB
         newUnits
-          | exclude && pruned_exclude =
+          | exclude && pruned.pruned_exclude =
             units `Set.union` depUnits
-          | not exclude && pruned_exclude =
+          | not exclude && pruned.pruned_exclude =
             units `Set.difference` depUnits
-          | exclude && not pruned_exclude =
+          | exclude && not pruned.pruned_exclude =
             depUnits `Set.difference` units
-          | otherwise {- not exclude && not pruned_exclude -} =
+          | otherwise {- not exclude && not pruned.pruned_exclude -} =
             units `Set.intersection` depUnits
 
 isDatabaseClosed :: Env -> Repo -> STM Bool

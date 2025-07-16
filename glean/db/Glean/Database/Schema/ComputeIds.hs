@@ -310,10 +310,10 @@ makeSchemaEnv resolved versions refToIdEnv
   | otherwise =
     error "no \"all\" schema"
   where
-    mkEnv ResolvedSchema{..} =
+    mkEnv schema =
        HashMap.union
          (mapNameEnv (Just . refsToIds refToIdEnv)
-           resolvedSchemaQualScope)
+           schema.resolvedSchemaQualScope)
          versionedNameEnv
 
     resolvedAlls = Map.fromList

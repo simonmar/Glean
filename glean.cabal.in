@@ -412,6 +412,7 @@ library util
     import: fb-haskell, fb-cpp, deps, thrift-client
     visibility: public
     hs-source-dirs: glean/util
+    default-extensions: OverloadedRecordDot, NoRecordWildCards
     exposed-modules:
         Glean.Impl.ThriftService
         Glean.Impl.ConfigProvider
@@ -449,7 +450,7 @@ library core
     import: fb-haskell, fb-cpp, deps, hsc2hs-cpp
     visibility: public
     hs-source-dirs: glean/hs
-    default-extensions: CPP
+    default-extensions: OverloadedRecordDot, NoRecordWildCards
     hsc2hs-options: --cflag=-DOSS=1
 
     exposed-modules:
@@ -537,7 +538,7 @@ library db
     import: fb-haskell, fb-cpp, deps, hsc2hs-cpp
     visibility: public
     hs-source-dirs: glean/db
-    default-extensions: CPP
+    default-extensions: OverloadedRecordDot, NoRecordWildCards
     cpp-options: -DOSS=1
 
     exposed-modules:

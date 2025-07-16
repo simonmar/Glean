@@ -84,10 +84,10 @@ instance Show (ThriftSource a) where
   show = thriftSourceShow
 
 instance Functor ThriftSource where
-  fmap f ThriftSource{..} = ThriftSource
-    { thriftSourceWith = \cfg g -> thriftSourceWith cfg (\ob -> g (fmap f ob))
-    , thriftSourceLoad = \cfg -> fmap f $ thriftSourceLoad cfg
-    , .. }
+  fmap f (ThriftSource sourceWith sourceLoad sourceShow) = ThriftSource
+    { thriftSourceWith = \cfg g -> sourceWith cfg (\ob -> g (fmap f ob))
+    , thriftSourceLoad = \cfg -> fmap f $ sourceLoad cfg
+    , thriftSourceShow = sourceShow }
 
 instance Default a => Default (ThriftSource a) where
   def = value def

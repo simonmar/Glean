@@ -302,15 +302,15 @@ data OwnershipStats = OwnershipStats
   }
 
 showOwnershipStats :: OwnershipStats -> Text
-showOwnershipStats OwnershipStats{..} =
-  showt numUnits <> " units (" <>
-    renderBytes (fromIntegral unitsSize) <> "), " <>
-  showt numSets <> " sets (" <>
-    renderBytes (fromIntegral setsSize) <> "), " <>
-  showt numOwnerEntries <> " owners (" <>
-    renderBytes (fromIntegral ownersSize) <> ")" <>
-  (if numOrphanFacts >= 0
-    then ", " <> showt numOrphanFacts <> " orphan facts"
+showOwnershipStats stats =
+  showt stats.numUnits <> " units (" <>
+    renderBytes (fromIntegral stats.unitsSize) <> "), " <>
+  showt stats.numSets <> " sets (" <>
+    renderBytes (fromIntegral stats.setsSize) <> "), " <>
+  showt stats.numOwnerEntries <> " owners (" <>
+    renderBytes (fromIntegral stats.ownersSize) <> ")" <>
+  (if stats.numOrphanFacts >= 0
+    then ", " <> showt stats.numOrphanFacts <> " orphan facts"
     else "")
 
 instance Storable OwnershipStats where
@@ -324,7 +324,15 @@ instance Storable OwnershipStats where
     ownersSize <- (# peek facebook::glean::rts::OwnershipStats, owners_size) p
     numOrphanFacts <-
       (# peek facebook::glean::rts::OwnershipStats, num_orphan_facts) p
-    return OwnershipStats{..}
+    return OwnershipStats
+      { numUnits = numUnits
+      , unitsSize = unitsSize
+      , numSets = numSets
+      , setsSize = setsSize
+      , numOwnerEntries = numOwnerEntries
+      , ownersSize = ownersSize
+      , numOrphanFacts = numOrphanFacts
+      }
   sizeOf _ = (# size facebook::glean::rts::OwnershipStats)
   alignment _ = (# alignment facebook::glean::rts::OwnershipStats)
   poke _ = error "Storable OwnershipStats"

@@ -164,26 +164,26 @@ mkEntry repo meta = Entry repo
 -- | Updates entryStatus. Needs be called whenever the status of this db or one
 -- of its dependencies changes
 recalculateStatus :: Catalog -> Entry -> STM ()
-recalculateStatus Catalog{..} entry = do
+recalculateStatus catalog@Catalog{catEntries, catRepoDependents} entry = do
   meta <- readTVar $ entryMeta entry
   entries <- readTVar catEntries
   case entries of
     Nothing -> return ()
-    Just Entries{..} -> do
+    Just entries -> do
       let
         repo = entryRepo entry
 
-        missingStatus repo | repo `HashMap.member` entriesRestoring =
+        missingStatus repo | repo `HashMap.member` entries.entriesRestoring =
           ItemRestoring
         missingStatus _ = ItemMissing
 
         dependencies = case metaDependencies meta of
-          Just (Thrift.Dependencies_stacked Thrift.Stacked{..}) ->
-            [(Repo stacked_name stacked_hash, stacked_guid)]
+          Just (Thrift.Dependencies_stacked stacked) ->
+            [(Repo stacked.stacked_name stacked.stacked_hash, stacked.stacked_guid)]
           Just (Thrift.Dependencies_pruned up) ->
             [(Thrift.pruned_base up, Thrift.pruned_guid up)]
           Nothing -> []
-        live = repo `HashMap.member` entriesLiveHere
+        live = repo `HashMap.member` entries.entriesLiveHere
       forM_ dependencies $ \(dep, _) -> if live then
           modifyTVar' catRepoDependents $
             HashMap.insertWith (<>) dep [repo]
@@ -200,7 +200,7 @@ recalculateStatus Catalog{..} entry = do
 
       dependencyStatuses <- forM dependencies $ \(dep, guid) -> do
         let missing = missingStatus dep
-        case HashMap.lookup dep entriesLiveHere of
+        case HashMap.lookup dep entries.entriesLiveHere of
           Nothing -> return missing
           Just entry -> do
             meta <- readTVar $ entryMeta entry
@@ -215,22 +215,22 @@ recalculateStatus Catalog{..} entry = do
       oldStatus <- readTVar $ entryStatus entry
       let
         status
-          | Just{} <- HashMap.lookup repo entriesFailed = ItemBroken
+          | Just{} <- HashMap.lookup repo entries.entriesFailed = ItemBroken
           | live = itemStatusFor $ metaCompleteness meta
           | otherwise = missingStatus repo
         newStatus = mconcat $ status:dependencyStatuses
 
       when (newStatus /= oldStatus) $ do
         writeTVar (entryStatus entry) newStatus
-        recalculateDepsStatus Catalog{..} repo
+        recalculateDepsStatus catalog repo
 
 recalculateDepsStatus :: Catalog -> Repo -> STM ()
-recalculateDepsStatus Catalog{..} repo = do
+recalculateDepsStatus catalog@Catalog{catRepoDependents, catEntries} repo = do
   repoDependents <- readTVar catRepoDependents
   entries <- readTVar catEntries
   forM_ (HashMap.lookupDefault [] repo repoDependents) $
-    \dep -> forM_ (entries >>= HashMap.lookup dep . entriesLiveHere) $
-      \entry -> recalculateStatus Catalog{..} entry
+    \dep -> forM_ (entries >>= HashMap.lookup dep . (.entriesLiveHere)) $
+      \entry -> recalculateStatus catalog entry
 
 itemDatabaseStatus :: ItemStatus -> Thrift.DatabaseStatus
 itemDatabaseStatus ItemComplete = Thrift.DatabaseStatus_Complete
@@ -250,7 +250,7 @@ dirtyEntry cat entry = do
 -- Accordingly, it runs in uninterruptibleMask_. Note that crashing in case of
 -- heap/stack overflow is preferable to this thread dying.
 commit :: Catalog -> IO ()
-commit cat@Catalog{..} = uninterruptibleMask_ loop
+commit cat@Catalog{catDirtyQueue, catEntries, catLocal} = uninterruptibleMask_ loop
   where
     loop = do
       continue <- bracket
@@ -268,21 +268,21 @@ commit cat@Catalog{..} = uninterruptibleMask_ loop
         (\r -> forM_ r $ \entry ->
             atomically $ writeTVar (entryComitting entry) False)
         $ \r -> case r of
-            Just entry@Entry{..} -> do
+            Just entry -> do
               meta <- atomically $ do
-                writeTVar entryDirty False
-                readTVar entryMeta
+                writeTVar entry.entryDirty False
+                readTVar entry.entryMeta
               -- catch *all* exceptions
-              r <- try $ Store.put catLocal entryRepo meta
+              r <- try $ Store.put catLocal entry.entryRepo meta
               case r of
                 Right ok -> when (not ok) $
                   -- TODO: What do we do in this case?
-                  logError $ inRepo entryRepo
+                  logError $ inRepo entry.entryRepo
                     "couldn't commit meta because entry no longer exists"
                 Left (exc :: SomeException) -> do
                   -- TODO: this is lame - it's not clear what to do if we can't
                   -- write the metadata
-                  logError $ inRepo entryRepo $
+                  logError $ inRepo entry.entryRepo $
                     "couldn't commit meta: " ++ show exc
                   atomically $ dirtyEntry cat entry
               return True
@@ -337,32 +337,31 @@ open local = do
 close :: Catalog -> IO ()
 close cat = do
   atomically $ do
-    Entries{..} <- getEntries cat
-    when (not $ HashSet.null entriesEphemeral) retry
+    entries <- getEntries cat
+    when (not $ HashSet.null entries.entriesEphemeral) retry
     writeTVar (catEntries cat) Nothing
   void $ waitCatch $ catCommitter cat
 
 -- | Create a new entry in a 'Catalog' and execute the supplied action if
 -- creation was successful.
 create :: Catalog -> Repo -> Meta -> STM () -> IO ()
-create cat@Catalog{..} repo meta on_success = tryBracket
+create cat@Catalog{catEntries, catLocal} repo meta on_success = tryBracket
   (atomically $ do
-    Entries{..} <- getEntries cat
+    entries <- getEntries cat
     when
-      (repo `HashMap.member` entriesLiveHere
-        || repo `HashSet.member` entriesEphemeral
-        || repo `HashMap.member` entriesRestoring) $
+      (repo `HashMap.member` entries.entriesLiveHere
+        || repo `HashSet.member` entries.entriesEphemeral
+        || repo `HashMap.member` entries.entriesRestoring) $
       throwSTM $ EntryAlreadyExists repo
-    writeTVar catEntries $ Just Entries
-      { entriesEphemeral = HashSet.insert repo entriesEphemeral, .. })
+    writeTVar catEntries $ Just entries
+      { entriesEphemeral = HashSet.insert repo entries.entriesEphemeral })
   (\_ r -> atomically $ do
     entry <- mkEntry repo meta
-    modifyTVar' catEntries $ fmap $ \Entries{..} -> Entries
-      { entriesEphemeral = HashSet.delete repo entriesEphemeral
+    modifyTVar' catEntries $ fmap $ \entries -> entries
+      { entriesEphemeral = HashSet.delete repo entries.entriesEphemeral
       , entriesLiveHere = case r of
-          Right _ -> HashMap.insert repo entry entriesLiveHere
-          Left _ -> entriesLiveHere
-      , ..
+          Right _ -> HashMap.insert repo entry entries.entriesLiveHere
+          Left _ -> entries.entriesLiveHere
       }
     recalculateStatus cat entry
     forM_ r $ const on_success)
@@ -374,7 +373,7 @@ create cat@Catalog{..} repo meta on_success = tryBracket
 
 -- | Permanently delete an entry from a 'Catalog'
 delete :: Catalog -> Repo -> IO ()
-delete cat@Catalog{..} repo = bracket_
+delete cat@Catalog{catDirtyQueue, catEntries, catLocal} repo = bracket_
   (atomically $ do
     entry <- getEntry cat repo
     committing <- readTVar (entryComitting entry)
@@ -384,14 +383,13 @@ delete cat@Catalog{..} repo = bracket_
       es <- flushTQueue catDirtyQueue
       mapM_ (writeTQueue catDirtyQueue)
         $ filter (\e -> entryRepo e /= repo) es
-    modifyTVar' catEntries $ fmap $ \Entries{..} -> Entries
-      { entriesLiveHere = HashMap.delete repo entriesLiveHere
-      , entriesEphemeral = HashSet.insert repo entriesEphemeral
-      , ..
+    modifyTVar' catEntries $ fmap $ \entries -> entries
+      { entriesLiveHere = HashMap.delete repo entries.entriesLiveHere
+      , entriesEphemeral = HashSet.insert repo entries.entriesEphemeral
       }
     recalculateStatus cat entry)
-  (atomically $ modifyTVar' catEntries $ fmap $ \Entries{..} -> Entries
-    { entriesEphemeral = HashSet.delete repo entriesEphemeral, .. })
+  (atomically $ modifyTVar' catEntries $ fmap $ \entries -> entries
+    { entriesEphemeral = HashSet.delete repo entries.entriesEphemeral })
   -- Ignore if it doesn't exist for now
   $ void $ Store.delete catLocal repo
 
@@ -406,20 +404,20 @@ list'
   -> Filter ()
   -> EntriesF (EntryF f)
   -> m [Item]
-list' read locs f Entries{..} = do
+list' read locs f entries = do
   fmap (runFilter f . concat) $ forM locs $ \loc -> do
     xs <- case loc of
-      Local -> mapM statusAndMeta entriesLiveHere
-      Restoring -> return $ fmap (ItemRestoring,) entriesRestoring
-      Cloud -> mapM statusAndMeta entriesLiveElsewhere
+      Local -> mapM statusAndMeta entries.entriesLiveHere
+      Restoring -> return $ fmap (ItemRestoring,) entries.entriesRestoring
+      Cloud -> mapM statusAndMeta entries.entriesLiveElsewhere
     return $
       [ Item repo loc meta status
       | (repo, (status, meta)) <- HashMap.toList xs]
   where
     -- statusAndMeta :: Entry -> f (ItemStatus, Meta)
-    statusAndMeta Entry{..} = do
-      status <- read entryStatus
-      meta <- read entryMeta
+    statusAndMeta entry = do
+      status <- read entry.entryStatus
+      meta <- read entry.entryMeta
       return (status, meta)
 
 -- | List the most recent instances of all DBs in the Catalog
@@ -432,9 +430,9 @@ listMostRecent catalog =  atomically $
 -- | Check if a database exists in the catalog
 exists :: Catalog -> [Locality] -> Repo -> STM Bool
 exists cat locs repo = do
-  Entries{..} <- getEntries cat
-  let exists_in Local = HashMap.member repo entriesLiveHere
-      exists_in Restoring = HashMap.member repo entriesRestoring
+  entries <- getEntries cat
+  let exists_in Local = HashMap.member repo entries.entriesLiveHere
+      exists_in Restoring = HashMap.member repo entries.entriesRestoring
       exists_in Cloud = False
   return $ any exists_in locs
 
@@ -465,20 +463,18 @@ modifyMeta cat repo f = do
 
 dbFailed :: Catalog -> Repo -> SomeException -> STM ()
 dbFailed cat repo exception = do
-  Entries{..} <- getEntries cat
-  writeTVar (catEntries cat) $ Just Entries
-    { entriesFailed = HashMap.insert repo exception entriesFailed
-    , ..
+  entries <- getEntries cat
+  writeTVar (catEntries cat) $ Just entries
+    { entriesFailed = HashMap.insert repo exception entries.entriesFailed
     }
   entry <- getEntry cat repo
   recalculateStatus cat entry
 
 resetFailed :: Catalog -> STM ()
 resetFailed cat = do
-  Entries{..} <- getEntries cat
-  writeTVar (catEntries cat) $ Just Entries
+  entries <- getEntries cat
+  writeTVar (catEntries cat) $ Just entries
     { entriesFailed = HashMap.empty
-    , ..
     }
 
 readExpiring :: Catalog -> Repo -> STM (Maybe UTCTime)
@@ -500,41 +496,39 @@ unsetExpiring cat repo = do
 -- | Schedule a database for download/restore
 startRestoring :: Catalog -> Repo -> Meta -> STM ()
 startRestoring cat repo meta = do
-  Entries{..} <- getEntries cat
+  entries <- getEntries cat
   when
-    (repo `HashMap.member` entriesLiveHere
-      || repo `HashMap.member` entriesRestoring
-      || repo `HashSet.member` entriesEphemeral)
+    (repo `HashMap.member` entries.entriesLiveHere
+      || repo `HashMap.member` entries.entriesRestoring
+      || repo `HashSet.member` entries.entriesEphemeral)
     $ throwM DBAlreadyExists
-  writeTVar (catEntries cat) $ Just Entries
-    { entriesRestoring = HashMap.insert repo meta entriesRestoring
-    , ..
+  writeTVar (catEntries cat) $ Just entries
+    { entriesRestoring = HashMap.insert repo meta entries.entriesRestoring
     }
   recalculateDepsStatus cat repo
 
 -- | Notify the catalog that the database has been restored and is available
 -- locally
 finishRestoring :: Catalog -> Repo -> IO ()
-finishRestoring cat@Catalog{..} repo = tryBracket
+finishRestoring cat@Catalog{catEntries, catLocal} repo = tryBracket
   (atomically $ do
-    Entries{..} <- getEntries cat
-    case HashMap.lookup repo entriesRestoring of
+    entries <- getEntries cat
+    case HashMap.lookup repo entries.entriesRestoring of
       Just meta -> do
-        writeTVar catEntries $ Just Entries
-          { entriesRestoring = HashMap.delete repo entriesRestoring
-          , entriesEphemeral = HashSet.insert repo entriesEphemeral
-          , ..
+        writeTVar catEntries $ Just entries
+          { entriesRestoring = HashMap.delete repo entries.entriesRestoring
+          , entriesEphemeral = HashSet.insert repo entries.entriesEphemeral
           }
         return meta
       Nothing -> dbError repo "finishRestoring: unknown database")
   (\meta r -> atomically $ do
     entry <- mkEntry repo meta
-    modifyTVar' catEntries $ fmap $ \Entries{..} -> Entries
-      { entriesEphemeral = HashSet.delete repo entriesEphemeral
+    modifyTVar' catEntries $ fmap $ \entries -> entries
+      { entriesEphemeral = HashSet.delete repo entries.entriesEphemeral
       , entriesLiveHere = case r of
-          Right _ -> HashMap.insert repo entry entriesLiveHere
-          Left _ -> entriesLiveHere
-      , .. }
+          Right _ -> HashMap.insert repo entry entries.entriesLiveHere
+          Left _ -> entries.entriesLiveHere
+      }
     recalculateStatus cat entry)
   $ \meta -> do
     ok <- Store.create catLocal repo meta
@@ -544,53 +538,51 @@ finishRestoring cat@Catalog{..} repo = tryBracket
 -- | Notify the catalog that the database is no longer being restored
 abortRestoring :: Catalog -> Repo -> STM ()
 abortRestoring cat repo = do
-  Entries{..} <- getEntries cat
-  when (not $ repo `HashMap.member` entriesRestoring) $ dbError repo
+  entries <- getEntries cat
+  when (not $ repo `HashMap.member` entries.entriesRestoring) $ dbError repo
     "abortRestoring: unknown database"
-  writeTVar (catEntries cat) $ Just Entries
-    { entriesRestoring = HashMap.delete repo entriesRestoring
-    , .. }
+  writeTVar (catEntries cat) $ Just entries
+    { entriesRestoring = HashMap.delete repo entries.entriesRestoring
+    }
   recalculateDepsStatus cat repo
 
 -- | Reset the catalog of items available elsewhere to the ones given
 resetElsewhere :: Catalog -> [Item] -> STM ()
 resetElsewhere cat items = do
-  Entries{..} <- getEntries cat
-  entriesElsewhere <- forM items $ \Item{..} -> do
-    e <- mkEntry itemRepo itemMeta
-    return (itemRepo, e)
-  writeTVar (catEntries cat) $ Just Entries
+  entries <- getEntries cat
+  entriesElsewhere <- forM items $ \item -> do
+    e <- mkEntry item.itemRepo item.itemMeta
+    return (item.itemRepo, e)
+  writeTVar (catEntries cat) $ Just entries
     { entriesLiveElsewhere =
         HashMap.fromList entriesElsewhere
-    , ..
     }
 
 getLocalDatabases :: Catalog -> STM (HashMap Repo Thrift.GetDatabaseResult)
 getLocalDatabases cat = do
-  Entries{..} <- getEntries cat
-  local <- HashMap.traverseWithKey (local_db Nothing) entriesLiveHere
+  entries <- getEntries cat
+  local <- HashMap.traverseWithKey (local_db Nothing) entries.entriesLiveHere
   elsewhere <- HashMap.traverseWithKey
     (local_db (Just Thrift.DatabaseStatus_Available))
-    entriesLiveElsewhere
+    entries.entriesLiveElsewhere
   return $ mconcat
     [ elsewhere
-    , updateFailed entriesFailed local
-    , HashMap.mapWithKey restoring_db entriesRestoring
+    , updateFailed entries.entriesFailed local
+    , HashMap.mapWithKey restoring_db entries.entriesRestoring
     ]
   where
     updateFailed entriesFailed = HashMap.mapWithKey $
-      \repo r@Thrift.GetDatabaseResult{..} ->
+      \repo r ->
         if
           | Just exception <- HashMap.lookup repo entriesFailed ->
-            Thrift.GetDatabaseResult {
-              getDatabaseResult_database = getDatabaseResult_database {
+            r {
+              Thrift.getDatabaseResult_database = r.getDatabaseResult_database {
                 Thrift.database_broken = Just $ Thrift.DatabaseBroken
                   { databaseBroken_task = "open"
                   , databaseBroken_reason = Text.pack (show exception)
                   }
-                },
-              ..
-            }
+                }
+              }
           | otherwise -> r
 
     local_db overrideStatus repo entry = do

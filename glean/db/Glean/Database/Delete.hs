@@ -43,7 +43,7 @@ import qualified Glean.Util.Warden as Warden
 -- | Schedule DBs for deletion or expiration.
 --   Throws 'UnknownDatabase' exceptions
 expireDatabase :: HasCallStack => Maybe NominalDiffTime -> Env -> Repo -> IO ()
-expireDatabase delay env@Env{..} repo = do
+expireDatabase delay env@(Env { envCatalog = envCatalog }) repo = do
   now <- getCurrentTime
   expired <- immediately $ do
     exp <- lift $ Catalog.readExpiring envCatalog repo
@@ -68,7 +68,7 @@ removeDatabase
   -> Repo
   -> TMVar (Maybe (DB s))
   -> IO ()
-removeDatabase env@Env{..} repo todo = uninterruptibleMask_ $
+removeDatabase env@(Env { envDeleting = envDeleting, envStorage = envStorage, envCatalog = envCatalog, envDerivations = envDerivations }) repo todo = uninterruptibleMask_ $
   -- This runs under uninterruptibleMask_ because there is really nothing
   -- sensible we can do if we get interrupted.
   --
@@ -82,17 +82,17 @@ removeDatabase env@Env{..} repo todo = uninterruptibleMask_ $
   do
     r <- atomically $ readTMVar todo
     let cleanUp = atomically (modifyTVar' envDeleting $ HashMap.delete repo)
-    forM_ r $ \DB{..} -> flip finally cleanUp $ do
+    forM_ r $ \db -> flip finally cleanUp $ do
       logInfo $ inRepo repo "deleting"
       addStatValueType "glean.db.deleted" 1 Stats.Sum
       atomically $ do
-        users <- readTVar dbUsers
+        users <- readTVar db.dbUsers
         when (users /= 0) retry
       logExceptions (\s -> inRepo repo $ "while deleting: " ++s) $ do
-        state <- readTVarIO dbState
+        state <- readTVarIO db.dbState
         case state of
           Open odb -> closeOpenDB env odb
-            `finally` atomically (writeTVar dbState Closed)
+            `finally` atomically (writeTVar db.dbState Closed)
           _ -> return ()
         Storage.delete envStorage repo
         Catalog.delete envCatalog repo
@@ -104,7 +104,7 @@ removeDatabase env@Env{..} repo todo = uninterruptibleMask_ $
 -- | Schedule a DB for deletion and return the 'Async' which can be used to
 -- obtain the result.
 asyncDeleteDatabase :: HasCallStack => Env -> Repo -> IO (Async ())
-asyncDeleteDatabase env@Env{..} repo = bracket
+asyncDeleteDatabase env@(Env { envWarden = envWarden, envActive = envActive, envDeleting = envDeleting, envCatalog = envCatalog }) repo = bracket
   newEmptyTMVarIO
   (\todo -> atomically $ tryPutTMVar todo Nothing) $ \todo -> do
     remover <- Warden.spawnMask envWarden $ \_ -> removeDatabase env repo todo

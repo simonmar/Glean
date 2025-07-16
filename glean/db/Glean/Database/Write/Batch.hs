@@ -92,8 +92,8 @@ makeDefineOwnership env repo nextId deps
     return define
 
 checkWritable :: Repo -> OpenDB s -> IO Writing
-checkWritable repo OpenDB{..} =
-  case odbWriting of
+checkWritable repo odb =
+  case odb.odbWriting of
     Nothing -> dbError repo "can't write to a read only database"
     Just writing -> return writing
 
@@ -101,13 +101,13 @@ checkWritable repo OpenDB{..} =
 -- it won't get propagated. Similarly, we can only add facts with
 -- explicit dependencies *after* @glean complete@.
 checkComplete :: Env -> Repo -> Thrift.Batch -> IO ()
-checkComplete env repo Thrift.Batch{..} = do
-  when (not $ HashMap.null batch_owned) $ do
+checkComplete env repo batch = do
+  when (not $ HashMap.null batch.batch_owned) $ do
     meta <- atomically $ Catalog.readMeta (envCatalog env) repo
     when (metaAxiomComplete meta) $
       throwIO $ Thrift.Exception
         "Attempting to write facts with ownership after 'glean complete'"
-  when (not $ HashMap.null batch_dependencies) $ do
+  when (not $ HashMap.null batch.batch_dependencies) $ do
     -- TODO: enforce that not only the axiom predicates be complete
     -- but that every predicate depended upon be complete.
     meta <- atomically $ Catalog.readMeta (envCatalog env) repo
@@ -122,12 +122,12 @@ writeDatabase
   -> WriteContent
   -> Point
   -> IO Subst
-writeDatabase env repo WriteContent{..} latency =
+writeDatabase env repo writeContent latency =
   readDatabase env repo $ \odb lookup -> do
     writing <- checkWritable repo odb
-    checkComplete env repo writeBatch
+    checkComplete env repo writeContent.writeBatch
     Stats.bump (envStats env) Stats.mutatorLatency =<< endTick latency
-    let !size = batchSize writeBatch
+    let !size = batchSize writeContent.writeBatch
 
     tick env repo WriteTraceInput Stats.mutatorInput size $ do
       -- If nobody is writing to the DB just write the batch directly.
@@ -136,12 +136,12 @@ writeDatabase env repo WriteContent{..} latency =
       -- not write in that case?
       r <- tryWithMutexSafe (wrLock writing) $ \lock ->
         reallyWriteBatch
-          env repo odb lock lookup writing size False writeBatch writeOwnership
+          env repo odb lock lookup writing size False writeContent.writeBatch writeContent.writeOwnership
       case r of
         Just cont -> cont
         Nothing ->
           -- Somebody is already writing to the DB - deduplicate the batch
-          deDupBatch env repo odb lookup writing size writeBatch writeOwnership
+          deDupBatch env repo odb lookup writing size writeContent.writeBatch writeContent.writeOwnership
 
 reallyWriteBatch
   :: Storage.Storage s
@@ -156,15 +156,15 @@ reallyWriteBatch
   -> Thrift.Batch
   -> Maybe DefineOwnership
   -> IO (IO Subst)
-reallyWriteBatch env repo OpenDB{..} lock lookup writing original_size deduped
-    batch@Thrift.Batch{..} maybeOwn = do
+reallyWriteBatch env repo odb lock lookup writing original_size deduped
+    batch maybeOwn = do
   let !real_size = batchSize batch
-  Stats.tick (envStats env) Stats.mutatorThroughput original_size
-    $ Stats.tick (envStats env)
-        (if deduped
-          then Stats.mutatorDedupedThroughput
-          else Stats.mutatorDupThroughput) real_size
-    $ do
+  Stats.tick (envStats env) Stats.mutatorThroughput original_size $
+    Stats.tick (envStats env)
+      (if deduped
+        then Stats.mutatorDedupedThroughput
+        else Stats.mutatorDupThroughput) real_size $
+    do
 
     next_id <- readIORef (wrNextId writing)
 
@@ -179,7 +179,7 @@ reallyWriteBatch env repo OpenDB{..} lock lookup writing original_size deduped
           withBase $ \base -> do
             withLookupCache writing base $ \cache -> do
               FactSet.renameFacts
-                (schemaInventory odbSchema)
+                (schemaInventory odb.odbSchema)
                 cache
                 next_id
                 batch
@@ -193,9 +193,9 @@ reallyWriteBatch env repo OpenDB{..} lock lookup writing original_size deduped
           let apply v = unsafeCoerceVector <$>
                 Subst.unsafeSubstIntervalsAndRelease subst
                   (unsafeCoerceVector v)
-          owned <- mapM apply batch_owned
-          Storage.addOwnership odbHandle lock owned
-          deps <- mapM (substDependencies subst) batch_dependencies
+          owned <- mapM apply batch.batch_owned
+          Storage.addOwnership odb.odbHandle lock owned
+          deps <- mapM (substDependencies subst) batch.batch_dependencies
           derivedOwners <-
             if | Just owners <- maybeOwn -> do
                   Ownership.substDefineOwnership owners subst
@@ -204,12 +204,12 @@ reallyWriteBatch env repo OpenDB{..} lock lookup writing original_size deduped
                   makeDefineOwnership env repo next_id deps
                | otherwise -> return Nothing
           forM_ derivedOwners $ \ownBatch ->
-            Storage.addDefineOwnership odbHandle lock ownBatch
+            Storage.addDefineOwnership odb.odbHandle lock ownBatch
 
         doCommit =
           tick env repo WriteTraceCommit
             Stats.commitThroughput real_size $ do
-              Storage.commit odbHandle facts
+              Storage.commit odb.odbHandle facts
 
       -- we're going to perform the actual commit outside the write
       -- lock, so that the next batch can start renaming while we're
@@ -250,7 +250,7 @@ deDupBatch
   -> Maybe DefineOwnership
   -> IO Subst
 deDupBatch env repo odb lookup writing original_size
-    batch@Thrift.Batch{..} maybeOwn =
+    batch maybeOwn =
   logExceptions (\s -> inRepo repo $ "dedup error: " ++ s) $ do
     next_id <- do
       r <- readTVarIO (wrCommit writing)
@@ -266,7 +266,7 @@ deDupBatch env repo odb lookup writing original_size
         -- return fact ids which conflict with ids in the renamed batch.
         Lookup.withSnapshot cache next_id $ \snapshot ->
           FactSet.renameFacts
-            (schemaInventory (odbSchema odb))
+            (schemaInventory (odb.odbSchema))
             snapshot
             next_id
             batch
@@ -290,8 +290,8 @@ deDupBatch env repo odb lookup writing original_size
         let apply v = unsafeCoerceVector <$>
               Subst.unsafeSubstIntervalsAndRelease dsubst
                 (unsafeCoerceVector v)
-        is <- mapM apply batch_owned
-        deps <- mapM (substDependencies dsubst) batch_dependencies
+        is <- mapM apply batch.batch_owned
+        deps <- mapM (substDependencies dsubst) batch.batch_dependencies
         forM_ maybeOwn $ \ownBatch ->
           Ownership.substDefineOwnership ownBatch dsubst
         -- And now write it do the DB, deduplicating again
@@ -310,8 +310,8 @@ withLookupCache
   -> Lookup.Lookup
   -> (Lookup.Lookup -> IO a)
   -> IO a
-withLookupCache Writing{..} lookup f = do
-  LookupCache.withCache lookup wrLookupCache LookupCache.FIFO f
+withLookupCache writing lookup f = do
+  LookupCache.withCache lookup writing.wrLookupCache LookupCache.FIFO f
 
 substDependencies
  :: Subst
@@ -326,7 +326,7 @@ substDependencies subst dmap = mapM substFD dmap
       Subst.substVector subst (unsafeCoerceVector v)
 
 batchSize :: Thrift.Batch -> Word64
-batchSize = fromIntegral . BS.length . Thrift.batch_facts
+batchSize batch = fromIntegral . BS.length $ batch.batch_facts
 
 tick
   :: Env -> Repo -> WriteTraceEvent -> Stats.Bump Tick -> Word64 -> IO a -> IO a

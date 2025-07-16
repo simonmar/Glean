@@ -34,7 +34,7 @@ import Glean.Util.Observed as Observed
 -- Throws an exception if the database is not incomplete
 -- or there are pending writes.
 finishDatabase :: Env -> Repo -> IO Thrift.FinishDatabaseResponse
-finishDatabase Env{..} repo  = do
+finishDatabase env@(Env{envCatalog, envActive, envServerConfig}) repo  = do
   atomically $ do
     -- Mark the database as finalizing.
     -- This is read and processed in getTodo in Backup.hs, which then
@@ -55,12 +55,12 @@ finishDatabase Env{..} repo  = do
       forM_ mdb $ \db -> do
         st <- readTVar (dbState db)
         case st of
-          Open odb@OpenDB { odbWriting = Just Writing{..} } -> do
+          Open odb@OpenDB { odbWriting = Just writing } -> do
             -- NB. check the active counter as well as the queue,
             -- because this will tell us if there are writes currently
             -- in progress.
-            active <- readTVar (writeQueueActive wrQueue)
-            empty <- isEmptyTQueue (writeQueue wrQueue)
+            active <- readTVar (writeQueueActive writing.wrQueue)
+            empty <- isEmptyTQueue (writeQueue writing.wrQueue)
             -- If there are outstanding writes then the client is
             -- either broken or is intentionally trying to complete
             -- the DB early. But we can't complete the DB with
@@ -77,7 +77,7 @@ finishDatabase Env{..} repo  = do
 -- WARNING! This is for testing only, and should
 -- never be used on a production database.
 unfinishDatabase :: Env -> Repo -> IO ()
-unfinishDatabase Env{..} repo  = do
+unfinishDatabase env@(Env{envCatalog, envServerConfig}) repo  = do
   backupPolicy <- ServerConfig.config_backup <$> Observed.get envServerConfig
   let isBackupAllowed = repo_name repo `HashSet.member`
         ServerConfig.databaseBackupPolicy_allowed backupPolicy

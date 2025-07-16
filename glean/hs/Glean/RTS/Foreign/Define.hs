@@ -89,7 +89,7 @@ defineBatch
   -> Thrift.Batch       -- ^ batch to rename
   -> DefineFlags        -- ^ flags
   -> IO Subst           -- ^ resulting substitution
-defineBatch facts inventory batch DefineFlags{..} =
+defineBatch facts inventory batch defineFlags =
   withDefine facts $ \p_facts ->
   with inventory $ \p_inventory ->
   withIds $ \ids_ptr ->
@@ -102,8 +102,8 @@ defineBatch facts inventory batch DefineFlags{..} =
       (fromIntegral $ Thrift.batch_count batch)
       facts_ptr
       facts_size
-      (fromBool trustRefs)
-      (fromBool ignoreRedef)
+      (fromBool defineFlags.trustRefs)
+      (fromBool defineFlags.ignoreRedef)
   where
     withIds f
       | Just ids <- Thrift.batch_ids batch =

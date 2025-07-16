@@ -142,8 +142,8 @@ unify a@RecordTy{} b@HasTy{} = unify b a
 unify a@SumTy{} b@HasTy{} = unify b a
 
 unify (HasKey keyTy x) predTy@(PredicateTy _ (PidRef _ ref)) = do
-  PredicateDetails{..} <- getPredicateDetails ref
-  unify predicateKeyType keyTy
+  predicateDetails <- getPredicateDetails ref
+  unify predicateDetails.predicateKeyType keyTy
   extend x predTy
 unify (HasKey a x) (HasKey b y)
   | x == y = return ()
@@ -277,16 +277,16 @@ apply_ unbound unboundHas t = do
 zonkVars :: T ()
 zonkVars = do
   vars <- gets tcVars
-  zonked <- forM vars $ \Var{..} -> do
+  zonked <- forM vars $ \var -> do
     let
       unbound _ = prettyError $ vcat
-          [ "variable " <> pretty var <>
+          [ "variable " <> pretty varName <>
             " has unknown type"
-          , "    try adding a type signature, like: " <> pretty var <> " : T"
+          , "    try adding a type signature, like: " <> pretty varName <> " : T"
           ]
-          where var = fromMaybe (Text.pack ('_':show varId)) varOrigName
-    t <- apply_ unbound resolveHas varType
-    return (Var { varType = t, ..})
+          where varName = fromMaybe (Text.pack ('_':show var.varId)) var.varOrigName
+    t <- apply_ unbound resolveHas var.varType
+    return (Var { varType = t, varId = var.varId, varOrigName = var.varOrigName})
   modify $ \s -> s { tcVars = zonked }
 
 zonkTcQuery :: TcQuery -> T TcQuery
@@ -317,8 +317,8 @@ zonkTcPat p = case p of
       (PredicateTy _ (PidRef _ ref), PredicateTy _ (PidRef _ ref'))
         | ref == ref' -> return e'
       (PredicateTy _ pidRef@(PidRef _ ref), _other) -> do
-        PredicateDetails{..} <- getPredicateDetails ref
-        let vpat = Ref (MatchWild predicateValueType)
+        predicateDetails <- getPredicateDetails ref
+        let vpat = Ref (MatchWild predicateDetails.predicateValueType)
         return (Ref (MatchExt (Typed ty'
           (TcFactGen pidRef e' vpat SeekOnAllFacts))))
       _ ->

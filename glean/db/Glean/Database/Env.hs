@@ -96,7 +96,7 @@ initEnv
   -> IO Env
 initEnv evb envStorage envCatalog shardManager cfg
   envSchemaSource updateSchema envServerConfig = do
-    ServerConfig.Config{..} <- Observed.get envServerConfig
+    config <- Observed.get envServerConfig
 
     envActive <- newTVarIO mempty
     envDeleting <- newTVarIO mempty
@@ -109,7 +109,7 @@ initEnv evb envStorage envCatalog shardManager cfg
     envCachedAvailableDBs <- newTVarIO mempty
 
     envLoggerRateLimit <-
-      newRateLimiterMap (fromIntegral config_logging_rate_limit) 600
+      newRateLimiterMap (fromIntegral config.config_logging_rate_limit) 600
 
     envWrites <- newTVarIO HashMap.empty
     envDerivations <- newTVarIO HashMap.empty
@@ -163,17 +163,17 @@ getDebugEnv = do
     return def
 
 spawnThreads :: Env -> IO ()
-spawnThreads env@Env{..} = do
-  ServerConfig.Config{..} <- Observed.get envServerConfig
+spawnThreads env = do
+  config <- Observed.get env.envServerConfig
 
   -- on completion, record the time we last ran the janitor. This is
   -- used by the server to know when to advertise the server as alive.
   let recordJanitorResult result = do
-        t <- envGetCurrentTime
-        atomically $ writeTVar envDatabaseJanitor $ Just (t, result)
+        t <- env.envGetCurrentTime
+        atomically $ writeTVar env.envDatabaseJanitor $ Just (t, result)
 
-  case config_janitor_period of
-    Just secs -> Warden.spawn_ envWarden
+  case config.config_janitor_period of
+    Just secs -> Warden.spawn_ env.envWarden
       $ doPeriodically (seconds (fromIntegral secs))
         -- a conservative timeout in case the janitor deadlocks for
         -- some reason.
@@ -204,18 +204,18 @@ spawnThreads env@Env{..} = do
     Nothing ->
       recordJanitorResult JanitorDisabled
 
-  Warden.spawn_ envWarden $ backuper env
+  Warden.spawn_ env.envWarden $ backuper env
 
-  replicateM_ (fromIntegral config_db_writer_threads)
-    $ Warden.spawn_ envWarden
-    $ writerThread env envWriteQueues
+  replicateM_ (fromIntegral config.config_db_writer_threads)
+    $ Warden.spawn_ env.envWarden
+    $ writerThread env env.envWriteQueues
 
-  when envUpdateSchema $ do
-    Warden.spawnDaemon envWarden "schema updater" $ do
-      void $ atomically $ takeTMVar envSchemaUpdateSignal
+  when env.envUpdateSchema $ do
+    Warden.spawnDaemon env.envWarden "schema updater" $ do
+      void $ atomically $ takeTMVar env.envSchemaUpdateSignal
       schemaUpdated env Nothing
-    doOnUpdate envSchemaSource $
-      atomically $ void $ tryPutTMVar envSchemaUpdateSignal ()
+    doOnUpdate env.envSchemaSource $
+      atomically $ void $ tryPutTMVar env.envSchemaUpdateSignal ()
 
   -- Disk usage counters
   Warden.spawn_ envWarden $ doPeriodically (seconds 600) $ do
@@ -235,10 +235,10 @@ spawnThreads env@Env{..} = do
 --   current job if there is one.
 -- * We should wait for in-progress backups or restores (or cancel them safely)
 closeEnv :: Env -> IO ()
-closeEnv env@Env{..} = do
+closeEnv env = do
   closeDatabases env
-  Warden.shutdown envWarden
-  Catalog.close envCatalog
+  Warden.shutdown env.envWarden
+  Catalog.close env.envCatalog
 
 -- | Like 'System.Timeout.timeout' but more resilient against FFI calls.
 --   The IO computation is run in a separate thread, and if it doesn't finish

@@ -33,11 +33,11 @@ newtype ThriftService p = ThriftService
 deriving instance Show (ThriftService p)
 
 instance IsThriftService ThriftService where
-  mkThriftService (HostPort h p) ThriftServiceOptions{..} = ThriftService
+  mkThriftService (HostPort h p) opts = ThriftService
     { headerConfig = headerConfig
     }
     where
-    timeout = round (fromMaybe 30 processingTimeout * 1000)
+    timeout = round (fromMaybe 30 opts.processingTimeout * 1000)
     headerConfig = HeaderConfig
       { headerHost = Text.encodeUtf8 h
       , headerPort = fromIntegral p
@@ -50,25 +50,25 @@ instance IsThriftService ThriftService where
 
   thriftServiceWithDbShard t _ = t  -- shards are irrelevant if we have host/port
 
-  runThrift evb ThriftService{..} action = do
+  runThrift evb thriftService action = do
     addrs <- getAddrInfo
       (Just defaultHints)
-      (Just (UTF8.toString (headerHost headerConfig)))
+      (Just (UTF8.toString (headerHost thriftService.headerConfig)))
       Nothing
     headerConfig' <- case addrs of
-       [] -> return headerConfig
+       [] -> return thriftService.headerConfig
        (addr : _) -> do
          (mHost, _) <- getNameInfo [NI_NUMERICHOST] True False
            (addrAddress addr)
          case mHost of
-           Nothing -> return headerConfig
+           Nothing -> return thriftService.headerConfig
            Just host -> return
-             headerConfig { headerHost = UTF8.fromString host }
+             thriftService.headerConfig { headerHost = UTF8.fromString host }
     withHeaderChannel evb headerConfig' action
 
-  getSelection _evb ThriftService{..} _ =
+  getSelection _evb thriftService _ =
     return
-      [ (Text.decodeUtf8 (headerHost headerConfig), headerPort headerConfig)
+      [ (Text.decodeUtf8 (headerHost thriftService.headerConfig), headerPort thriftService.headerConfig)
       ]
 
 #else /* !FBTHRIFT */
@@ -84,7 +84,7 @@ newtype ThriftService p = ThriftService
 deriving instance Show (ThriftService p)
 
 instance IsThriftService ThriftService where
-  mkThriftService (HostPort h p) ThriftServiceOptions{..} = ThriftService
+  mkThriftService (HostPort h p) opts = ThriftService
     { httpConfig = httpConfig
     }
     where
@@ -93,19 +93,19 @@ instance IsThriftService ThriftService where
       , httpPort = fromIntegral p
       , httpProtocolId = compactProtocolId
       , httpResponseTimeout =
-          Just $ round (fromMaybe 30 processingTimeout * 1000000)
+          Just $ round (fromMaybe 30 opts.processingTimeout * 1000000)
       }
   mkThriftService _ _ = error "basic-thriftservice does not support Tier"
 
   thriftServiceWithDbShard t _ = t
     -- shards are irrelevant if we have host/port
 
-  runThrift _evb ThriftService{..} action =
-    withHTTPChannel httpConfig action
+  runThrift _evb thriftService action =
+    withHTTPChannel thriftService.httpConfig action
 
-  getSelection _evb ThriftService{..} _ =
+  getSelection _evb thriftService _ =
     return
-      [ (Text.decodeUtf8 (httpHost httpConfig), httpPort httpConfig)
+      [ (Text.decodeUtf8 (httpHost thriftService.httpConfig), httpPort thriftService.httpConfig)
       ]
 
 #endif

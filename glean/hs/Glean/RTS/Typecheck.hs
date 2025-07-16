@@ -32,7 +32,7 @@ typecheck
   -> Register 'BinaryOutputPtr
   -> Type
   -> Code ()
-typecheck syscalls@SysCalls{..} input inputend out = tc
+typecheck syscalls input inputend out = tc
   where
     tc ByteTy = do
       size <- constant 1
@@ -80,31 +80,31 @@ typecheck syscalls@SysCalls{..} input inputend out = tc
     tc (SetTy ByteTy) = local $ \size -> do
       inputNat input inputend size
       local $ \set ptr -> do
-        newWordSet set
+        syscalls.newWordSet set
         move input ptr
         inputBytes input inputend size
-        insertBytesWordSet set ptr input
-        byteSetToByteArray set out
-        freeWordSet set
+        syscalls.insertBytesWordSet set ptr input
+        syscalls.byteSetToByteArray set out
+        syscalls.freeWordSet set
       return ()
     tc (SetTy elty) = local $ \size -> do
       inputNat input inputend size
       local $ \set -> mdo
-        newSet set
+        syscalls.newSet set
         jumpIf0 size end
         loop <- label
         output $ \tempOut -> do
           typecheck syscalls input inputend tempOut elty
-          insertOutputSet set tempOut
+          syscalls.insertOutputSet set tempOut
           decrAndJumpIfNot0 size loop
         end <- label
-        setToArray set out
-        freeSet set
+        syscalls.setToArray set out
+        syscalls.freeSet set
       return ()
     tc (PredicateTy _ (PidRef (Pid pid) _)) = local $ \ide -> do
       t <- constant $ fromIntegral pid
       inputNat input inputend ide
-      rename ide t ide
+      syscalls.rename ide t ide
       outputNat ide out
     tc (NamedTy _ (ExpandedType _ ty)) = tc ty
     tc (MaybeTy ty) = mdo

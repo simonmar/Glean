@@ -226,9 +226,9 @@ data SchemaIndex = SchemaIndex
   }
 
 schemaForSchemaId :: SchemaIndex -> SchemaId -> Maybe ProcessedSchema
-schemaForSchemaId SchemaIndex{..} id = find (containsId id) instances
+schemaForSchemaId schemaIndex id = find (containsId id) instances
   where
-    instances = schemaIndexCurrent : schemaIndexOlder
+    instances = schemaIndex.schemaIndexCurrent : schemaIndex.schemaIndexOlder
     containsId id = (== id) . hashedSchemaId . procSchemaHashed
 
 -- | The schema that we've read from the filesystem or the configs. We
@@ -329,13 +329,13 @@ schemaSourceIndexConfig key = ThriftSource.genericConfig
       => cfg
       -> Internal.SchemaIndex
       -> IO SchemaIndex
-    loadInstances cfg Internal.SchemaIndex{..} = do
-      let proc Internal.SchemaInstance{..} = do
+    loadInstances cfg schemaIndex = do
+      let proc schemaInstance = do
             let
               instanceKey = Text.pack $
                 takeDirectory (Text.unpack key) </>
-                Text.unpack schemaInstance_file
-            maybeVersion <- lift $ checkVersions schemaInstance_versions
+                Text.unpack schemaInstance.schemaInstance_file
+            maybeVersion <- lift $ checkVersions schemaInstance.schemaInstance_versions
             str <- lift $ Config.get cfg instanceKey Right
             cache <- State.get
             case processSchemaCached maybeVersion cache str of
@@ -346,8 +346,8 @@ schemaSourceIndexConfig key = ThriftSource.genericConfig
                 State.put newcache
                 return result
       flip evalStateT HashMap.empty $ do
-        current <- proc schemaIndex_current
-        older <- mapM proc schemaIndex_older
+        current <- proc schemaIndex.schemaIndex_current
+        older <- mapM proc schemaIndex.schemaIndex_older
         return (SchemaIndex current (reverse older))
 
 checkVersions :: Map Text Version -> IO (Maybe (SchemaId, Version))
@@ -367,14 +367,14 @@ parseSchemaDir dir = do
 
 parseSchemaIndex :: FilePath -> IO SchemaIndex
 parseSchemaIndex file = do
-  Internal.SchemaIndex{..} <- loadJSON file
-  let proc Internal.SchemaInstance{..} = do
+  schemaIndex <- loadJSON file :: IO Internal.SchemaIndex
+  let proc schemaInstance = do
         let dir = takeDirectory file
-        str <- B.readFile (dir </> Text.unpack schemaInstance_file)
-        maybeVersion <- checkVersions schemaInstance_versions
+        str <- B.readFile (dir </> Text.unpack schemaInstance.schemaInstance_file)
+        maybeVersion <- checkVersions schemaInstance.schemaInstance_versions
         either (throwIO . ErrorCall) return $ processSchema maybeVersion str
-  current <- proc schemaIndex_current
-  older <- mapM proc schemaIndex_older
+  current <- proc schemaIndex.schemaIndex_current
+  older <- mapM proc schemaIndex.schemaIndex_older
   return (SchemaIndex current older)
 
 -- | Concatenate the contents of all the .angle files, prepending the
@@ -525,13 +525,21 @@ options = do
     , cfgFilterAvailableDBs = const $ return []
     , cfgTracer = mempty
     , cfgSchemaId = Nothing
-    , .. }
+    , cfgDataStore = cfgDataStore
+    , cfgSchemaLocation = cfgSchemaLocation
+    , cfgServerConfig = cfgServerConfig
+    , cfgReadOnly = cfgReadOnly
+    , cfgMockWrites = cfgMockWrites
+    , cfgEnableRecursion = cfgEnableRecursion
+    , cfgDebug = cfgDebug }
   where
     debugParser :: Parser DebugFlags
     debugParser = do
       tcDebug <- switch (long "debug-tc")
       queryDebug <- switch (long "debug-query")
-      return DebugFlags{..}
+      return DebugFlags
+        { tcDebug = tcDebug
+        , queryDebug = queryDebug }
 
     serverConfigThriftSource = option (eitherReader ThriftSource.parse)
       (  long "server-config"

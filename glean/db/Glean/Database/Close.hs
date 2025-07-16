@@ -35,7 +35,7 @@ import Util.Time
 
 
 closeDatabases :: Env -> IO ()
-closeDatabases env@Env{..} = do
+closeDatabases env@Env{envActive} = do
   dbs <- readTVarIO envActive
   forM_ (HashMap.keys dbs) $ closeDatabase env
 
@@ -44,9 +44,9 @@ isIdle long_enough db odb = and <$> sequence
   [ (== 1) <$> readTVar (dbUsers db)  -- we are the only user
   , long_enough <$> readTVar (odbIdleSince odb)
   , case odbWriting odb of
-      Just Writing{..} -> do
-        writeQueueSize <- readTVar (writeQueueSize wrQueue)
-        commit <- readTVar wrCommit
+      Just writing -> do
+        writeQueueSize <- readTVar (writeQueueSize writing.wrQueue)
+        commit <- readTVar writing.wrCommit
         return $ writeQueueSize == 0 && isNothing commit
       Nothing -> return True
   ]
@@ -81,8 +81,8 @@ closeDatabase env = closeIf
     Open odb -> do
       deleteWriteQueues env odb
       case odbWriting odb of
-        Just Writing{..} -> do
-          r <- readTVar wrCommit
+        Just writing -> do
+          r <- readTVar writing.wrCommit
           when (isJust r) retry
         Nothing -> return ()
       return $ Just odb
@@ -110,7 +110,7 @@ closeIdleDatabase env repo duration = do
     repo
 
 closeIdleDatabases :: Env -> DiffTimePoints -> [Repo] -> IO ()
-closeIdleDatabases env@Env{..} duration blocklist = do
+closeIdleDatabases env@Env{envActive} duration blocklist = do
   dbs <- readTVarIO envActive
   let notBlocklisted = filter (not . (`elem` blocklist)) (HashMap.keys dbs)
   forM_ notBlocklisted $ \repo -> closeIdleDatabase env repo duration
@@ -119,7 +119,7 @@ closeIdleDatabases env@Env{..} duration blocklist = do
 -- | set a counter glean.db.<repo>.open to the number of currently
 -- open DBs for that particular repo name.
 exportOpenDBStats :: Env -> IO ()
-exportOpenDBStats Env{..} = do
+exportOpenDBStats Env{envActive} = do
   opens <- atomically $ do
     dbs <- readTVar envActive
     forM (HashMap.toList dbs) $ \(repo, db) -> do
@@ -133,11 +133,11 @@ exportOpenDBStats Env{..} = do
     setCounter ("glean.db." <> Text.encodeUtf8 repoNm <> ".open") count
 
 closeOpenDB :: Storage.Storage s => Env -> OpenDB s -> IO ()
-closeOpenDB env OpenDB{..} = do
-  case odbWriting of
-    Just Writing{..} -> do
+closeOpenDB env odb = do
+  case odb.odbWriting of
+    Just writing -> do
       -- free memory and update counters
-      withMutex wrLock $ const $ LookupCache.clear wrLookupCache
+      withMutex writing.wrLock $ const $ LookupCache.clear writing.wrLookupCache
       updateLookupCacheStats env
     Nothing -> return ()
-  Storage.close odbHandle
+  Storage.close odb.odbHandle

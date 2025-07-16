@@ -50,7 +50,7 @@ realConfigAPI :: TestConfigAPI -> ConfigAPI
 realConfigAPI (TestConfigAPI cfg) = cfg
 
 instance TestConfigProvider TestConfigAPI where
-  setTestConfig (TestConfigAPI ConfigAPI{..}) path contents = do
-    let file = fromMaybe "" (configDir opts) </> Text.unpack path
+  setTestConfig (TestConfigAPI configAPI) path contents = do
+    let file = fromMaybe "" (configDir configAPI.opts) </> Text.unpack path
     createDirectoryIfMissing True (takeDirectory file)
     ByteString.writeFile file contents

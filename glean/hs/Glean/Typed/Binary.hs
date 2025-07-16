@@ -111,25 +111,25 @@ thriftEnum_buildRtsValue b x = buildRtsSelector b $ fromThriftEnum x
 
 instance Type Word64 where
   buildRtsValue b x = FFI.call $ RTS.glean_push_value_nat b x
-  decodeRtsValue = Decoder $ \DecoderEnv{..} ->
-    FFI.ffiBuf buf $ RTS.glean_pop_value_nat begin end
+  decodeRtsValue = Decoder $ \env ->
+    FFI.ffiBuf env.buf $ RTS.glean_pop_value_nat env.begin env.end
   sourceType _ = Angle.NatTy
 
 instance Type ByteString where
   buildRtsValue b xs = BS.unsafeUseAsCStringLen xs $ \(p,n) -> do
     FFI.call $ RTS.glean_push_value_array b (fromIntegral n)
     FFI.call $ RTS.glean_push_value_bytes b (castPtr p) (fromIntegral n)
-  decodeRtsValue = Decoder $ \DecoderEnv{..} -> do
-    size <- FFI.ffiBuf buf $ RTS.glean_pop_value_array begin end
-    ptr <- FFI.ffiBuf buf $ RTS.glean_pop_value_bytes begin end size
+  decodeRtsValue = Decoder $ \env -> do
+    size <- FFI.ffiBuf env.buf $ RTS.glean_pop_value_array env.begin env.end
+    ptr <- FFI.ffiBuf env.buf $ RTS.glean_pop_value_bytes env.begin env.end size
     BS.unsafePackMallocCStringLen (castPtr ptr, fromIntegral size)
   sourceType _ = Angle.ArrayTy Angle.ByteTy
 
 instance Type Text where
   buildRtsValue b s = FFI.withUTF8Text s $ \p n ->
     FFI.call $ RTS.glean_push_value_string b (castPtr p) n
-  decodeRtsValue = Decoder $ \DecoderEnv{..} -> do
-    (p,n) <- FFI.invoke $ RTS.glean_pop_value_string begin end
+  decodeRtsValue = Decoder $ \env -> do
+    (p,n) <- FFI.invoke $ RTS.glean_pop_value_string env.begin env.end
     FFI.unsafeMallocedUTF8 (castPtr p) n
   sourceType _ = Angle.StringTy
 
@@ -153,17 +153,17 @@ instance Type Bool where
 instance Type Nat where
   buildRtsValue b nat = FFI.call $
     RTS.glean_push_value_nat b ((fromIntegral . unNat) nat)
-  decodeRtsValue = Decoder $ \DecoderEnv{..} ->
+  decodeRtsValue = Decoder $ \env ->
     fmap (Nat . fromIntegral)
-         (FFI.ffiBuf buf (RTS.glean_pop_value_nat begin end))
+         (FFI.ffiBuf env.buf (RTS.glean_pop_value_nat env.begin env.end))
   sourceType _ = Angle.NatTy
 
 instance Type Byte where
   buildRtsValue b byt = FFI.call $
     RTS.glean_push_value_byte b ((fromIntegral . unByte) byt)
-  decodeRtsValue = Decoder $ \DecoderEnv{..} ->
+  decodeRtsValue = Decoder $ \env ->
     fmap (Byte . fromIntegral)
-         (FFI.ffiBuf buf (RTS.glean_pop_value_byte begin end))
+         (FFI.ffiBuf env.buf (RTS.glean_pop_value_byte env.begin env.end))
   sourceType _ = Angle.ByteTy
 
 -- -----------------------------------------------------------------------------
@@ -174,8 +174,8 @@ instance Type a => Type [a] where
   buildRtsValue b xs = liftIO $ do
     FFI.call $ RTS.glean_push_value_array b $ fromIntegral $ length xs
     mapM_ (buildRtsValue b) xs
-  decodeRtsValue = Decoder $ \env@DecoderEnv{..} -> do
-    size <- FFI.ffiBuf buf $ RTS.glean_pop_value_array begin end
+  decodeRtsValue = Decoder $ \env -> do
+    size <- FFI.ffiBuf env.buf $ RTS.glean_pop_value_array env.begin env.end
     replicateM (fromIntegral size) (runDecoder decodeRtsValue env)
 
   sourceType _ = Angle.ArrayTy (sourceType (Proxy @a))
@@ -197,8 +197,8 @@ instance {-# OVERLAPPING #-} Type (Set Byte) where
       forM_ xs $ \x ->
         insertWordRtsSet set (unByte x)
       buildWordSetBytes set b
-  decodeRtsValue = Decoder $ \env@DecoderEnv{..} -> do
-    size <- FFI.ffiBuf buf $ RTS.glean_pop_value_set begin end
+  decodeRtsValue = Decoder $ \env -> do
+    size <- FFI.ffiBuf env.buf $ RTS.glean_pop_value_set env.begin env.end
     fromList <$> replicateM (fromIntegral size) (runDecoder decodeRtsValue env)
   sourceType _ = Angle.SetTy Angle.ByteTy
 
@@ -208,8 +208,8 @@ instance {-# OVERLAPPING #-} Type (Set Nat) where
       forM_ xs $ \x -> do
         insertWordRtsSet set (unNat x)
       buildWordSet set b
-  decodeRtsValue = Decoder $ \env@DecoderEnv{..} -> do
-    size <- FFI.ffiBuf buf $ RTS.glean_pop_value_set begin end
+  decodeRtsValue = Decoder $ \env -> do
+    size <- FFI.ffiBuf env.buf $ RTS.glean_pop_value_set env.begin env.end
     fromList <$> replicateM (fromIntegral size) (runDecoder decodeRtsValue env)
   sourceType _ = Angle.SetTy Angle.NatTy
 
@@ -222,8 +222,8 @@ instance {-# OVERLAPPABLE #-} (Type a, Ord a) => Type (Set a) where
           insertBuilder set tb
           RTS.resetBuilder tb
       buildSet set b
-  decodeRtsValue = Decoder $ \env@DecoderEnv{..} -> do
-    size <- FFI.ffiBuf buf $ RTS.glean_pop_value_set begin end
+  decodeRtsValue = Decoder $ \env -> do
+    size <- FFI.ffiBuf env.buf $ RTS.glean_pop_value_set env.begin env.end
     fromList <$> replicateM (fromIntegral size) (runDecoder decodeRtsValue env)
   sourceType _ = Angle.SetTy (sourceType (Proxy @a))
 
@@ -232,8 +232,8 @@ instance {-# OVERLAPPABLE #-} (Type a, Ord a) => Type (Set a) where
 -- | 'IdOf' as a Glean primitive
 instance (Type p) => Type (IdOf p) where
   buildRtsValue b (IdOf fid) = FFI.call $ RTS.glean_push_value_fact b fid
-  decodeRtsValue = Decoder $ \DecoderEnv{..} ->
-    IdOf <$> FFI.ffiBuf buf (RTS.glean_pop_value_fact begin end)
+  decodeRtsValue = Decoder $ \env ->
+    IdOf <$> FFI.ffiBuf env.buf (RTS.glean_pop_value_fact env.begin env.end)
   sourceType _ = sourceType (Proxy @p)
 
 -- -----------------------------------------------------------------------------

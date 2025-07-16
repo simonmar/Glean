@@ -147,17 +147,17 @@ type instance CodeResult (Many a cg) = CodeResult cg
 -- hoisting.
 constant :: Word64 -> Code (Register 'Word)
 constant w = Code $ do
-  s@CodeS{..} <- S.get
-  case IntMap.lookup (fromIntegral w) csConstantMap of
+  s <- S.get
+  case IntMap.lookup (fromIntegral w) s.csConstantMap of
     Just r -> return r
     Nothing -> do
       S.put s
-        { csConstants = w : csConstants
-        , csNextConstant = succ csNextConstant
+        { csConstants = w : s.csConstants
+        , csNextConstant = succ s.csNextConstant
         , csConstantMap =
-            IntMap.insert (fromIntegral w) csNextConstant csConstantMap
+            IntMap.insert (fromIntegral w) s.csNextConstant s.csConstantMap
         }
-      return csNextConstant
+      return s.csNextConstant
 
 -- | Generate a chunk of code with reserved fresh registers. The registers can
 -- be reused afterwards.
@@ -222,19 +222,19 @@ data CallSite = CallSite
 
 callSite :: Code CallSite
 callSite = do
-  CodeS{..} <- Code S.get
-  return (CallSite csNextLocal csNextOutput)
+  codeS <- Code S.get
+  return (CallSite codeS.csNextLocal codeS.csNextOutput)
 
 calledFrom :: [CallSite] -> Code a -> Code a
 calledFrom frames inner = do
-  CodeS{..} <- Code S.get
+  codeS <- Code S.get
   Code $ S.modify' $ \s -> s
     { csNextLocal = maximum (map callSiteNextLocal frames)
     , csNextOutput = maximum (map callSiteNextOutput frames) }
   x <- inner
   Code $ S.modify' $ \s -> s
-    { csNextLocal = csNextLocal
-    , csNextOutput = csNextOutput }
+    { csNextLocal = codeS.csNextLocal
+    , csNextOutput = codeS.csNextOutput }
   return x
 
 -- | Register that a query statement performs a full scan over a predicate.
@@ -262,7 +262,7 @@ generate
 generate opt cg = do
   let (gen, sup) = S.runState (genCode cg) $ regSupply $ register Input 0
       !nextInput = peekSupply sup
-  ((), CodeS{..}) <- S.runStateT (runCode gen) CodeS
+  ((), codeS) <- S.runStateT (runCode gen) CodeS
         { csLabel = Label 0
         , csInsns = []
         , csBlocks = []
@@ -277,10 +277,10 @@ generate opt cg = do
         , csMaxOutputs = castRegister nextInput
         , csFullScans = mempty }
       -- sanity check
-  when (not $ null csInsns) $ fail "unterminated basic block"
+  when (not $ null codeS.csInsns) $ fail "unterminated basic block"
   let -- output registers go after input registers
-      finalInputSize = registerIndex csMaxOutputs
-      constantsSize = registerIndex csNextConstant
+      finalInputSize = registerIndex codeS.csMaxOutputs
+      constantsSize = registerIndex codeS.csNextConstant
       get_label pc label =
         let addr = offsets VP.! fromLabel label
         in assert (addr /= maxBound) $ addr - pc
@@ -295,7 +295,7 @@ generate opt cg = do
         Optimised -> shortcut
         Unoptimised -> id
       (insns, offsets) = layout $ optimise CFG
-        { cfgBlocks = V.fromListN (fromLabel csLabel) $ reverse csBlocks
+        { cfgBlocks = V.fromListN (fromLabel codeS.csLabel) $ reverse codeS.csBlocks
         , cfgEntry = Label 0
         }
       code = concat $ snd $ mapAccumL
@@ -305,14 +305,14 @@ generate opt cg = do
           (next, insnWords get_reg (get_label next) insn))
         0
         insns
-      meta = Meta csFullScans
+      meta = Meta codeS.csFullScans
   (meta,) <$> subroutine
     (VS.fromListN (length code) code)
     finalInputSize
     (finalInputSize - registerIndex nextInput)
-    (registerIndex csMaxLocal + constantsSize)
-    (reverse csConstants)
-    (map fst $ sortBy (comparing snd) $ HashMap.toList csLiterals)
+    (registerIndex codeS.csMaxLocal + constantsSize)
+    (reverse codeS.csConstants)
+    (map fst $ sortBy (comparing snd) $ HashMap.toList codeS.csLiterals)
 
 
 -- | Control flow graph
@@ -329,14 +329,14 @@ data CFG = CFG
 --
 -- NOTE: This will leave behind unreachable blocks.
 shortcut :: CFG -> CFG
-shortcut cfg@CFG{..}
+shortcut cfg
   | V.all isNothing shortcuts = cfg
   | otherwise = CFG
       { cfgBlocks = V.imap
-          (\i Block{..} ->
-              Block { blockInsns = mapLabels relabel <$> inline i blockInsns })
-          cfgBlocks
-      , cfgEntry = relabel cfgEntry
+          (\i block ->
+              Block { blockInsns = mapLabels relabel <$> inline i block.blockInsns })
+          cfg.cfgBlocks
+      , cfgEntry = relabel cfg.cfgEntry
       }
   where
     inline i _
@@ -346,7 +346,7 @@ shortcut cfg@CFG{..}
     inline _ insns = insns
 
     -- FIXME: This can loop if the generated code contains infinite loops
-    shortcuts = cfgBlocks <&> \Block{..} -> case blockInsns of
+    shortcuts = cfg.cfgBlocks <&> \block -> case block.blockInsns of
       [insn] -> Just $ case insn of
         Jump target | Just insn' <- shortcuts V.! fromLabel target -> insn'
         _ -> insn
@@ -384,9 +384,9 @@ data Layout s = Layout
 --
 -- There is obviously ample room for improvement here.
 layout :: CFG -> ([Insn], VP.Vector Word64)
-layout CFG{..} = runST $ do
-  mlabels <- VPM.replicate (V.length cfgBlocks) maxBound
-  emit cfgEntry Layout
+layout cfg = runST $ do
+  mlabels <- VPM.replicate (V.length cfg.cfgBlocks) maxBound
+  emit cfg.cfgEntry Layout
     { layoutOffset = 0
     , layoutLabels = mlabels
     , layoutInsns = []
@@ -395,10 +395,10 @@ layout CFG{..} = runST $ do
   where
     -- Emit a specific block which must not have been emitted already
     emit :: Label -> Layout s -> ST s ([Insn], VP.Vector Word64)
-    emit !label layout@Layout{..} = do
-      VPM.write layoutLabels (fromLabel label) layoutOffset
+    emit !label layout = do
+      VPM.write layout.layoutLabels (fromLabel label) layout.layoutOffset
 
-      case blockInsns (cfgBlocks V.! fromLabel label) of
+      case (cfg.cfgBlocks V.! fromLabel label).blockInsns of
         -- Handle unconditional jumps specially
         Jump target : insns -> do
           s <- stillTodo layout target
@@ -410,18 +410,18 @@ layout CFG{..} = runST $ do
 
     -- Emit the numerically lowest unemitted block (if any)
     emitNext :: Layout s -> ST s ([Insn], VP.Vector Word64)
-    emitNext layout@Layout{..}
-      | Just (label, todo) <- IntSet.minView layoutTodo = do
+    emitNext layout
+      | Just (label, todo) <- IntSet.minView layout.layoutTodo = do
           s <- stillTodo layout $ Label label
           (if s then emit (Label label) else emitNext) layout{layoutTodo = todo}
       | otherwise = do
-          labels <- VP.unsafeFreeze layoutLabels
-          return (reverse $ concat layoutInsns, labels)
+          labels <- VP.unsafeFreeze layout.layoutLabels
+          return (reverse $ concat layout.layoutInsns, labels)
 
     -- Has a block already been emitted
     stillTodo :: Layout s -> Label -> ST s Bool
-    stillTodo Layout{..} label =
-      (== maxBound) <$> VPM.read layoutLabels (fromLabel label)
+    stillTodo layout label =
+      (== maxBound) <$> VPM.read layout.layoutLabels (fromLabel label)
 
     -- Emit instructions
     addInsns :: [Insn] -> Layout s -> Layout s
@@ -458,13 +458,13 @@ registerIndex (Register i) = i .&. 0x3FFFFFFFFFFFFFFF
 -- to the new block.
 newBlock :: Maybe Insn -> Code ()
 newBlock terminator = Code $ do
-  s@CodeS{..} <- S.get
-  let !label = succ csLabel
+  s <- S.get
+  let !label = succ s.csLabel
       insn = fromMaybe (Jump label) terminator
   S.put $! s
     { csLabel = label
     , csInsns = []
-    , csBlocks = Block (insn : csInsns) : csBlocks
+    , csBlocks = Block (insn : s.csInsns) : s.csBlocks
     }
 
 -- | Add a literal to the literal table and yield its index
@@ -474,10 +474,10 @@ literal lit = Code $ Literal . fromIntegral <$> do
   case HashMap.lookup lit m of
     Just n -> return n
     Nothing -> do
-      n <- S.gets csLiteralsSize
-      S.modify' $ \s@CodeS{..} -> s
-        { csLiterals = HashMap.insert lit n csLiterals
-        , csLiteralsSize = csLiteralsSize + 1 }
+      n <- S.gets (.csLiteralsSize)
+      S.modify' $ \s -> s
+        { csLiterals = HashMap.insert lit n s.csLiterals
+        , csLiteralsSize = s.csLiteralsSize + 1 }
       return n
 
 -- | Yield a label for the current position in the code
@@ -489,7 +489,7 @@ label = do
 
 -- | Issue an instruction which doesn't modify the program counter
 issue :: Insn -> Code ()
-issue insn = Code $ S.modify' $ \s@CodeS{..} -> s { csInsns = insn : csInsns }
+issue insn = Code $ S.modify' $ \s -> s { csInsns = insn : s.csInsns }
 
 -- | Issue an instruction which always modifies the program counter
 issueEndBlock :: Insn -> Code ()

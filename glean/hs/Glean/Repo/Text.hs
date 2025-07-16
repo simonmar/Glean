@@ -34,10 +34,10 @@ showRepoSep sep repo =
 
 -- | Render the Repo in NAME/HASH format to Text
 repoToText :: Repo -> Text
-repoToText Repo{..} = repo_name <> "/" <> repo_hash
+repoToText repo = repo.repo_name <> "/" <> repo.repo_hash
 
 repoToTextSep :: Text -> Repo -> Text
-repoToTextSep sep Repo{..} = repo_name <> sep <> repo_hash
+repoToTextSep sep repo = repo.repo_name <> sep <> repo.repo_hash
 
 readRepo :: String -> String -> Repo
 readRepo sep s = fromMaybe (Repo t "") (parseRepoTextSep tsep t)

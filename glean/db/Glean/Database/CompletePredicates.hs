@@ -67,41 +67,41 @@ syncCompletePredicates env repo =
   let withBase repo f =
         readDatabase env repo $ \_ lookup -> f (Just lookup)
   maybe ($ Nothing) withBase maybeBase $ \base -> do
-  withOpenDatabase env repo $ \OpenDB{..} -> do
-    own <- Storage.computeOwnership odbHandle base
-      (schemaInventory odbSchema)
-    withWriteLock odbWriting $ \lock ->
-      Storage.storeOwnership odbHandle lock own
-    maybeOwnership <- readTVarIO odbOwnership
+  withOpenDatabase env repo $ \odb -> do
+    own <- Storage.computeOwnership odb.odbHandle base
+      (schemaInventory odb.odbSchema)
+    withWriteLock odb.odbWriting $ \lock ->
+      Storage.storeOwnership odb.odbHandle lock own
+    maybeOwnership <- readTVarIO odb.odbOwnership
     forM_ maybeOwnership $ \ownership -> do
       stats <- getOwnershipStats ownership
       logInfo $ "ownership propagation complete: " <> showOwnershipStats stats
 
 completeAxiomPredicates :: Env -> Repo -> IO CompletePredicatesResponse
-completeAxiomPredicates env@Env{..} repo = do
+completeAxiomPredicates env repo = do
   let
     doCompletion = -- we are masked in here
       (`finally` deregister) $ do
       r <- tryAll $ syncCompletePredicates env repo
       case r of
         Left (e :: SomeException) -> do
-          setBroken repo envCatalog "completePredicates" e
+          setBroken repo env.envCatalog "completePredicates" e
           throwIO e
         Right{} -> setComplete
 
     deregister =
-      atomically $ modifyTVar envCompleting $ HashMap.delete repo
+      atomically $ modifyTVar env.envCompleting $ HashMap.delete repo
 
     setComplete = void $ atomically $
-      Catalog.modifyMeta envCatalog repo $ \meta ->
+      Catalog.modifyMeta env.envCatalog repo $ \meta ->
         return meta { metaAxiomComplete = True }
 
     isInProgress = do
-      completing <- now $ readTVar envCompleting
+      completing <- now $ readTVar env.envCompleting
       return (HashMap.lookup repo completing)
 
     storeComputation async =
-      modifyTVar envCompleting (HashMap.insert repo async)
+      modifyTVar env.envCompleting (HashMap.insert repo async)
 
   scheduleCompletion
     env repo SkipIfComplete doCompletion isInProgress storeComputation
@@ -109,16 +109,16 @@ completeAxiomPredicates env@Env{..} repo = do
 -- | Propagate ownership information for an externally derived predicate.
 syncCompleteDerivedPredicate :: Env -> Repo -> Pid -> IO ()
 syncCompleteDerivedPredicate env repo pid =
-  withOpenDatabase env repo $ \OpenDB{..} -> do
-  maybeOwnership <- readTVarIO odbOwnership
+  withOpenDatabase env repo $ \odb -> do
+  maybeOwnership <- readTVarIO odb.odbOwnership
   forM_ maybeOwnership $ \ownership -> do
     maybeBase <- repoParent env repo
     let withBase repo f = readDatabase env repo $ \_ lookup -> f (Just lookup)
     maybe ($ Nothing) withBase maybeBase $ \base ->
-      withWriteLock odbWriting $ \lock -> do
+      withWriteLock odb.odbWriting $ \lock -> do
         computed <- Storage.computeDerivedOwnership
-          odbHandle lock ownership base pid
-        Storage.storeOwnership odbHandle lock computed
+          odb.odbHandle lock ownership base pid
+        Storage.storeOwnership odb.odbHandle lock computed
 
 withWriteLock
   :: Maybe Writing
@@ -138,17 +138,17 @@ completeDerivedPredicate
   -> Repo
   -> PredicateRef
   -> IO CompletePredicatesResponse
-completeDerivedPredicate env@Env{..} repo pred = do
+completeDerivedPredicate env repo pred = do
   details <- withOpenDatabase env repo $ \odb ->
     predicateDetails (odbSchema odb) pred
-  completing <- readTVarIO envCompletingDerived
+  completing <- readTVarIO env.envCompletingDerived
   let
       doCompletion = do -- we are masked in here
         r <- tryAll $
           syncCompleteDerivedPredicate env repo (predicatePid details)
         case r of
           Left (e :: SomeException) -> do
-            setBroken repo envCatalog "completeDerivedPredicate" e
+            setBroken repo env.envCatalog "completeDerivedPredicate" e
             throwIO e
           Right{} -> return ()
 
@@ -160,7 +160,7 @@ completeDerivedPredicate env@Env{..} repo pred = do
         return (HashMap.lookup predId derivations)
 
       storeComputation async =
-        modifyTVar envCompletingDerived $
+        modifyTVar env.envCompletingDerived $
           HashMap.insert repo $
           HashMap.insert predId async derivations
 
@@ -185,17 +185,17 @@ scheduleCompletion
   -> Defer IO STM (Maybe (Async ()))
   -> (Async () -> STM ())
   -> IO CompletePredicatesResponse
-scheduleCompletion Env{..} repo onAxiomComplete
+scheduleCompletion env repo onAxiomComplete
   doCompletion isInProgress storeComputation = do
     mask_ $ do
     -- speculatively spawn a thread to do the completion, we'll cancel
     -- this if we don't need it. This is so that we can atomically
     -- start the job and update the Env state together.
     tmvar <- newEmptyTMVarIO
-    async <- Warden.spawn envWarden $
+    async <- Warden.spawn env.envWarden $
       atomically (takeTMVar tmvar) >> doCompletion
     join $ immediately $ do
-      meta <- now $ Catalog.readMeta envCatalog repo
+      meta <- now $ Catalog.readMeta env.envCatalog repo
       if
         | SkipIfComplete <- onAxiomComplete, metaAxiomComplete meta -> do
           later $ cancel async -- already done
@@ -205,7 +205,7 @@ scheduleCompletion Env{..} repo onAxiomComplete
         | Broken b <- metaCompleteness meta -> do
           later $ cancel async
           now $ throwSTM $ Exception $ databaseBroken_reason b
-        | envReadOnly -> do
+        | env.envReadOnly -> do
           later $ cancel async
           now $ throwSTM $ Exception "DB is read-only"
         | otherwise -> do

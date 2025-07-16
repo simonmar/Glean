@@ -48,19 +48,19 @@ decodeFact serialized cache fid (Thrift.Fact _pid k v) = mkFact fid
 decodeRef
   :: forall p. (Predicate p, Typeable p)
   => Decoder p
-decodeRef = Decoder $ \env@DecoderEnv{..} -> do
+decodeRef = Decoder $ \env -> do
   (fid :: IdOf p) <- runDecoder decodeRtsValue env
-  cache <- liftIO $ readIORef cacheRef
+  cache <- liftIO $ readIORef env.cacheRef
   let id = fromIntegral (fromFid (idOf fid))
   case IntMap.lookup id cache of
     Just dyn
       | Just p <- fromDynamic dyn -> return p
       | otherwise -> liftIO $ throwIO $ ErrorCall "decodeRef: wrong type"
     Nothing -> do
-      case IntMap.lookup id serialized of
+      case IntMap.lookup id env.serialized of
         Nothing -> return (justId fid)
         Just fact -> do
-          f <- decodeFact serialized cacheRef fid fact
-          liftIO $ modifyIORef' cacheRef $ \cache ->
+          f <- decodeFact env.serialized env.cacheRef fid fact
+          liftIO $ modifyIORef' env.cacheRef $ \cache ->
             IntMap.insert id (toDyn f) cache
           return f

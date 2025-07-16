@@ -32,15 +32,15 @@ logDBStatistics
   -> IO ()
 logDBStatistics
   env
-  Thrift.Repo{..}
+  repo
   preds
   maybeOwnershipStats
   size
   locator
   excluded = do
   let preamble = mconcat
-        [ Logger.SetRepoName repo_name
-        , Logger.SetRepoHash repo_hash
+        [ Logger.SetRepoName repo.repo_name
+        , Logger.SetRepoHash repo.repo_hash
         ]
 
   -- We shoehorn a summary row into the format for query rows
@@ -54,35 +54,35 @@ logDBStatistics
 
   let queries  =
         [ mconcat
-          [ Logger.SetPredicateName predicateRef_name
-          , Logger.SetPredicateVersion (fromIntegral predicateRef_version)
-          , Logger.SetPredicateCount $ fromIntegral predicateStats_count
-          , Logger.SetPredicateSize $ fromIntegral predicateStats_size
+          [ Logger.SetPredicateName predicateRef.predicateRef_name
+          , Logger.SetPredicateVersion (fromIntegral predicateRef.predicateRef_version)
+          , Logger.SetPredicateCount $ fromIntegral predicateStats.predicateStats_count
+          , Logger.SetPredicateSize $ fromIntegral predicateStats.predicateStats_size
           ]
-        | (PredicateRef{..}, Thrift.PredicateStats{..}) <- preds
+        | (predicateRef, predicateStats) <- preds
         ]
 
   let ownership
-        | Just OwnershipStats{..} <- maybeOwnershipStats =
+        | Just ownershipStats <- maybeOwnershipStats =
           [
             mconcat
               [ Logger.SetMetric "ownership_units"
-              , Logger.SetCount $ fromIntegral numUnits
-              , Logger.SetSize $ fromIntegral unitsSize
+              , Logger.SetCount $ fromIntegral ownershipStats.numUnits
+              , Logger.SetSize $ fromIntegral ownershipStats.unitsSize
               ],
             mconcat
               [ Logger.SetMetric "ownership_sets"
-              , Logger.SetCount $ fromIntegral numSets
-              , Logger.SetSize $ fromIntegral setsSize
+              , Logger.SetCount $ fromIntegral ownershipStats.numSets
+              , Logger.SetSize $ fromIntegral ownershipStats.setsSize
               ],
             mconcat
               [ Logger.SetMetric "ownership_fact_owners"
-              , Logger.SetCount $ fromIntegral numOwnerEntries
-              , Logger.SetSize $ fromIntegral ownersSize
+              , Logger.SetCount $ fromIntegral ownershipStats.numOwnerEntries
+              , Logger.SetSize $ fromIntegral ownershipStats.ownersSize
               ],
             mconcat
               [ Logger.SetMetric "ownership_orphan_facts"
-              , Logger.SetCount $ fromIntegral numOrphanFacts
+              , Logger.SetCount $ fromIntegral ownershipStats.numOrphanFacts
               ]
           ]
         | otherwise = []

@@ -29,28 +29,28 @@ disassemble name syscalls sub =
   [ "Subroutine " <> name
   , "  // Code: "
       <> Text.pack (show (length instructions)) <> " insns, "
-      <> Text.pack (show (V.length subInsns)) <> " bytes"
+      <> Text.pack (show (V.length subroutineCode.subInsns)) <> " bytes"
   , "  // Literals: "
-            <> Text.pack (show $ sum $ map BS.length subLiterals)
+            <> Text.pack (show $ sum $ map BS.length subroutineCode.subLiterals)
             <> " bytes"
-  , "  #inputs = " <> Text.pack (show subInputs)
-  , "  #outputs = " <> Text.pack (show subOutputs)
-  , "  #locals = " <> Text.pack (show subLocals) ]
+  , "  #inputs = " <> Text.pack (show subroutineCode.subInputs)
+  , "  #outputs = " <> Text.pack (show subroutineCode.subOutputs)
+  , "  #locals = " <> Text.pack (show subroutineCode.subLocals) ]
   ++
   [ "  #" <> Text.pack (show i) <> " = " <> Text.pack (show lit)
-    | (i,lit) <- zip [0 :: Int ..] subLiterals ]
+    | (i,lit) <- zip [0 :: Int ..] subroutineCode.subLiterals ]
   ++
   [ "  %" <> Text.pack (show i) <> " = " <> Text.pack (show c)
-    | (i,c) <- zip [subInputs..] (V.toList subConstants) ]
+    | (i,c) <- zip [subroutineCode.subInputs..] (V.toList subroutineCode.subConstants) ]
   ++
   [ "" ]
   ++ code ++
   [ "*** ERROR ***" | not $ null rest ]
   where
-    SubroutineCode{..} = inspect sub
+    subroutineCode = inspect sub
 
     instructions :: [Insn]
-    (instructions, rest) = D.decodeAll $ V.toList subInsns
+    (instructions, rest) = D.decodeAll $ V.toList subroutineCode.subInsns
 
     labels = snd
       $ IntMap.mapAccum

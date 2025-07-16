@@ -215,10 +215,10 @@ dSelector = dffi glean_pop_value_selector
 -- | Obtain a reference to an RTS-mangled string from the 'Decoder'. The
 -- reference has the same lifetime as the 'Decoder'.
 dTrustedStringRef :: Decoder s -> ST s (MangledStringRef, CSize)
-dTrustedStringRef Decoder{..} = unsafeIOToST $ do
-  start <- peek decoderPtr
-  n <- glean_pop_value_trusted_string_ref decoderPtr decoderEnd
-  end <- peek decoderPtr
+dTrustedStringRef decoder = unsafeIOToST $ do
+  start <- peek decoder.decoderPtr
+  n <- glean_pop_value_trusted_string_ref decoder.decoderPtr decoder.decoderEnd
+  end <- peek decoder.decoderPtr
   return
     ( MangledStringRef
         { mangledBytes = ByteStringRef

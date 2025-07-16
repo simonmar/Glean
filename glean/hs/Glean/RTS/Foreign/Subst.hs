@@ -102,12 +102,12 @@ unsafeSubstIntervalsAndRelease subst ins = do
   return new
 
 deserialize :: Thrift.Subst -> IO Subst
-deserialize Thrift.Subst{..} =
-  VS.unsafeWith subst_ids $ \ids_ptr ->
+deserialize thriftSubst =
+  VS.unsafeWith thriftSubst.subst_ids $ \ids_ptr ->
     construct $ invoke $
       glean_subst_deserialize
-        (Fid subst_firstId)
-        (fromIntegral $ VS.length subst_ids)
+        (Fid thriftSubst.subst_firstId)
+        (fromIntegral $ VS.length thriftSubst.subst_ids)
         ids_ptr
 
 foreign import ccall unsafe glean_new_subst

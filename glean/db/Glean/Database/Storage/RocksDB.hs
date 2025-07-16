@@ -71,16 +71,16 @@ data RocksDB = RocksDB
   }
 
 newStorage :: FilePath -> ServerConfig.Config -> IO RocksDB
-newStorage root ServerConfig.Config{..} = do
-  cache <- if config_db_rocksdb_cache_mb > 0
+newStorage root config = do
+  cache <- if config.config_db_rocksdb_cache_mb > 0
     then
-      Just <$> newCache (fromIntegral config_db_rocksdb_cache_mb * 1024 * 1024)
+      Just <$> newCache (fromIntegral config.config_db_rocksdb_cache_mb * 1024 * 1024)
     else return Nothing
   return RocksDB
     { rocksRoot = root
     , rocksCache = cache
     , rocksCacheIndexAndFilterBlocks =
-        config_db_rocksdb_cache_index_and_filter_blocks
+        config.config_db_rocksdb_cache_index_and_filter_blocks
     }
 
 newtype Container = Container (Ptr Container)
@@ -306,7 +306,7 @@ tar args = do
       unless (ec == ExitSuccess) $ throwIO $ userError err
 
 containerPath :: RocksDB -> Repo -> FilePath
-containerPath RocksDB{..} repo = databasePath rocksRoot repo </> "db"
+containerPath rocksDB repo = databasePath rocksDB.rocksRoot repo </> "db"
 
 instance CanLookup (Database RocksDB) where
   lookupName db = "rocksdb:" <> repoToText (dbRepo db)

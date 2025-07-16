@@ -111,8 +111,8 @@ decodeWithCache serialized cache decoder v =
 
 -- | A generic decoder for sum types. Can throw 'GleanFFIError'
 sumD :: Decoder b -> [Decoder b] -> Decoder b
-sumD empty alts = Decoder $ \env@DecoderEnv{..} -> do
-  sel <- FFI.ffiBuf buf $ RTS.glean_pop_value_selector begin end
+sumD empty alts = Decoder $ \env -> do
+  sel <- FFI.ffiBuf env.buf $ RTS.glean_pop_value_selector env.begin env.end
   let Decoder f = index sel alts
   f env
   where
@@ -122,8 +122,8 @@ sumD empty alts = Decoder $ \env@DecoderEnv{..} -> do
 
 -- | A generic decoder, used for Bool. Can throw 'GleanFFIError'
 enumD :: forall a. (Enum a, Bounded a) => Decoder a -> Decoder a
-enumD unknown = Decoder $ \env@DecoderEnv{..} -> do
-  sel <- FFI.ffiBuf buf $ RTS.glean_pop_value_selector begin end
+enumD unknown = Decoder $ \env -> do
+  sel <- FFI.ffiBuf env.buf $ RTS.glean_pop_value_selector env.begin env.end
   let Decoder f = if sel <= ord maxBound - ord minBound
         then return $ toEnum $ fromIntegral $ sel + ord minBound
         else unknown
@@ -133,7 +133,7 @@ enumD unknown = Decoder $ \env@DecoderEnv{..} -> do
 
 -- | A generic decoder for thrift enum types.
 thriftEnumD :: ThriftEnum a => Decoder a
-thriftEnumD = Decoder $ \DecoderEnv{..} ->
+thriftEnumD = Decoder $ \env ->
   fmap (toThriftEnum . fromIntegral)
-    $ FFI.ffiBuf buf
-    $ RTS.glean_pop_value_selector begin end
+    $ FFI.ffiBuf env.buf
+    $ RTS.glean_pop_value_selector env.begin env.end

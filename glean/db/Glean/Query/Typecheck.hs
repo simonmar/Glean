@@ -87,7 +87,7 @@ typecheck dbSchema opts rtsType query = do
       { tcEnvPredicates = predicatesById dbSchema
       , tcEnvTypes = typesById dbSchema
       }
-  (q@(TcQuery ty _ _ _ _), TypecheckState{..}) <-
+  (q@(TcQuery ty _ _ _ _), finalState) <-
     let state = initialTypecheckState tcEnv opts rtsType TcModeQuery in
     withExceptT (Text.pack . show) $ flip runStateT state $ do
       modify $ \s -> s { tcVisible = varsQuery query mempty }
@@ -113,7 +113,7 @@ typecheck dbSchema opts rtsType query = do
              [ "query has ambiguous type",
                indent 4 $ "type: " <> display opts retTy'
              ]
-  return (QueryWithInfo q tcNextVar Nothing ty, tcPreds)
+  return (QueryWithInfo q finalState.tcNextVar Nothing ty, finalState.tcPreds)
 
 -- | Typecheck the query for a derived predicate
 typecheckDeriving
@@ -124,14 +124,14 @@ typecheckDeriving
   -> PredicateDetails
   -> DerivingInfo' s st
   -> ExceptT Text IO (DerivingInfo TypecheckedQuery)
-typecheckDeriving tcEnv opts rtsType PredicateDetails{..} derivingInfo = do
+typecheckDeriving tcEnv opts rtsType predDetails derivingInfo = do
   (d, _) <-
     let state = initialTypecheckState tcEnv opts rtsType TcModePredicate
     in
     withExceptT (Text.pack . show) $ flip runStateT state $ do
     flip catchError
       (\e -> throwError $ vcat
-        [ "In " <> pretty (predicateIdRef predicateId) <> ":"
+        [ "In " <> pretty (predicateIdRef predDetails.predicateId) <> ":"
         , indent 2 e ]) $ do
       case derivingInfo of
         NoDeriving -> return NoDeriving

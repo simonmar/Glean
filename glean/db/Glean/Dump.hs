@@ -29,8 +29,8 @@ dump :: Backend b => b -> Repo -> (JsonFactBatch -> IO ()) -> IO ()
 dump backend repo withBatch = doDump =<< loadDbSchema backend repo
   where
     doDump dbSchema = do
-      FactIdRange{..} <- factIdRange backend repo
-      go iNVALID_ID [] 0 factIdRange_start factIdRange_finish
+      range <- factIdRange backend repo
+      go iNVALID_ID [] 0 range.factIdRange_start range.factIdRange_finish
       where
 
       doneBatch :: Id -> [(Id,Fact)] -> IO ()
@@ -40,14 +40,14 @@ dump backend repo withBatch = doDump =<< loadDbSchema backend repo
         case lookupPid (Pid pid) dbSchema of
           Nothing -> throwIO $ ErrorCall $ "unknown predicate Id: " <> show pid
           Just details@PredicateDetails{} -> do
-            jsonFacts <- forM (reverse facts) $ \(fid, Fact{..}) ->
+            jsonFacts <- forM (reverse facts) $ \(fid, fact) ->
                 factToJSON
                   True
                   mempty
                   details
                   (Fid fid)
-                  fact_key
-                  fact_value
+                  fact.fact_key
+                  fact.fact_value
                 `catchAll` \exc -> throwIO $ ErrorCall $ show exc
             withBatch JsonFactBatch
               { jsonFactBatch_predicate = predicateRef details
@@ -66,8 +66,8 @@ dump backend repo withBatch = doDump =<< loadDbSchema backend repo
             r <- queryFact backend repo nextId
             case r of
               Nothing -> go currentPid facts batchSize (nextId+1) finalId
-              Just fact@Fact{..} ->
-                if fact_type == currentPid && batchSize < maxBatchSize
+              Just fact ->
+                if fact.fact_type == currentPid && batchSize < maxBatchSize
                   then go
                     currentPid
                     ((nextId,fact):facts)
@@ -76,5 +76,5 @@ dump backend repo withBatch = doDump =<< loadDbSchema backend repo
                     finalId
                   else do
                     doneBatch currentPid facts
-                    go fact_type [(nextId,fact)] 1 (nextId+1) finalId
+                    go fact.fact_type [(nextId,fact)] 1 (nextId+1) finalId
         | otherwise = doneBatch currentPid facts

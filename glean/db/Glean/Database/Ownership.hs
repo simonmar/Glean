@@ -42,9 +42,9 @@ factOwnership
   -> IO (Maybe OwnerExpr)
 factOwnership env repo fid = do
   maybeSet <- readDatabase env repo $ \_ lookup -> getFactOwner lookup fid
-  stack <- withOpenDatabaseStack env repo $ \OpenDB{..} -> do
-    ownership <- readTVarIO odbOwnership
-    return (ownership, Storage.getUnit odbHandle)
+  stack <- withOpenDatabaseStack env repo $ \odb -> do
+    ownership <- readTVarIO odb.odbOwnership
+    return (ownership, Storage.getUnit odb.odbHandle)
   let
     ownerships = mapMaybe fst stack
 

@@ -140,11 +140,11 @@ pid (PidRef x _) = x
 
 -- | Transform facts back into the type the query originally asked for.
 transformResultsBack :: ResultTransformations -> QueryResults -> QueryResults
-transformResultsBack (ResultTransformations trans) results@QueryResults{..}
+transformResultsBack (ResultTransformations trans) results
   | IntMap.null trans = results
   | otherwise = results
-    { queryResultsFacts = overFacts queryResultsFacts
-    , queryResultsNestedFacts = overFacts queryResultsNestedFacts
+    { queryResultsFacts = overFacts results.queryResultsFacts
+    , queryResultsNestedFacts = overFacts results.queryResultsNestedFacts
     }
   where
     overFacts :: Vector (Fid, Thrift.Fact) -> Vector (Fid, Thrift.Fact)
@@ -154,7 +154,7 @@ transformResultsBack (ResultTransformations trans) results@QueryResults{..}
     overFact fact@(Thrift.Fact pid _ _) =
       case IntMap.lookup (fromIntegral pid) trans of
         Nothing -> fact
-        Just PredicateTransformation{..} -> tTransformFactBack fact
+        Just predicateTransformation -> predicateTransformation.tTransformFactBack fact
 
 -- ===========================================================================
 -- Byte code manipulation
@@ -291,7 +291,7 @@ transformType qtrans ty = transform ty
     overPidRef pref =
       case lookupTransformation (pid pref) qtrans of
         Nothing -> pref
-        Just PredicateTransformation{..} -> tAvailable
+        Just predicateTransformation -> predicateTransformation.tAvailable
 
     overExpandedType (ExpandedType tref ty) =
       ExpandedType tref (transform ty)
@@ -640,7 +640,7 @@ transformBytes'
   -> Type
   -> Type
   -> Maybe (Bytes -> Register 'BinaryOutputPtr -> Code ())
-transformBytes' QueryRegs{..} discard src dst =
+transformBytes' queryRegs discard src dst =
   case go src dst of
     Left _ -> Nothing
     Right transform -> Just $ \bytes out -> transform out bytes
@@ -682,15 +682,15 @@ transformBytes' QueryRegs{..} discard src dst =
         inputNat start end size
         local $ \set -> mdo
           jumpIf0 size finish
-          newSet set
+          queryRegs.newSet set
           loop <- label
           output $ \tempOut -> do
             trans tempOut (Bytes start end)
-            insertOutputSet set tempOut
+            queryRegs.insertOutputSet set tempOut
             decrAndJumpIfNot0 size loop
           finish <- label
-          setToArray set out
-          freeSet set
+          queryRegs.setToArray set out
+          queryRegs.freeSet set
         return ()
   go (SumTy from) (SumTy to)
     | sameOrder && sameTypes = Left $ copy (SumTy to)
@@ -798,15 +798,15 @@ transformBytes' QueryRegs{..} discard src dst =
         inputNat start end size
         local $ \set -> mdo
           jumpIf0 size finish
-          newSet set
+          queryRegs.newSet set
           loop <- label
           output $ \tempOut -> do
             trans tempOut (Bytes start end)
-            insertOutputSet set tempOut
+            queryRegs.insertOutputSet set tempOut
             decrAndJumpIfNot0 size loop
           finish <- label
-          setToArray set out
-          freeSet set
+          queryRegs.setToArray set out
+          queryRegs.freeSet set
         return ()
   go (SetTy from) (ArrayTy to) =
     let trans =

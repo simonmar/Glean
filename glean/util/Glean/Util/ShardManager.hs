@@ -83,7 +83,7 @@ shardByRepo getAssignedShards =
 shardByRepoHash :: IO (Maybe [Text]) -> ShardManager Text
 shardByRepoHash refShardAssignment = ShardManager
   refShardAssignment
-  (pure (\_ Glean.Repo{..} -> repo_hash))
+  (pure (\_ repo -> repo.repo_hash))
   (pure [])
 
 -- | A shard manager that uses base of stack repo hashes as shards,
@@ -91,5 +91,5 @@ shardByRepoHash refShardAssignment = ShardManager
 shardByBaseOfStackRepoHash :: IO (Maybe [Text]) -> ShardManager Text
 shardByBaseOfStackRepoHash refShardAssignment = ShardManager
   refShardAssignment
-  (pure (\(BaseOfStack Glean.Repo{..}) _ -> repo_hash))
+  (pure (\(BaseOfStack repo) _ -> repo.repo_hash))
   (pure [])

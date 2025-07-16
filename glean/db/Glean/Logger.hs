@@ -43,6 +43,6 @@ runLogCmd cmd env log =
           log <> Logger.SetMethod cmd <> Logger.SetWeight weight
 
 runLogRepo :: Text -> Env -> Repo -> GleanServerLog -> IO ()
-runLogRepo cmd env Repo{..} log =
+runLogRepo cmd env repo log =
   runLogCmd cmd env $
-    log <> Logger.SetRepoName repo_name <> Logger.SetRepoHash repo_hash
+    log <> Logger.SetRepoName repo.repo_name <> Logger.SetRepoHash repo.repo_hash

@@ -64,11 +64,11 @@ sendJsonBatchAsync backend repo batches opts = do
       { Thrift.sendJsonBatch_batches = batches
       , Thrift.sendJsonBatch_options = opts
       , Thrift.sendJsonBatch_remember = True }
-  case r of
-    Right Thrift.SendJsonBatchResponse{..} ->
-      return sendJsonBatchResponse_handle
-    Left Thrift.Retry{..} ->
-      retry retry_seconds $
+  case r :: Either Thrift.Retry Thrift.SendJsonBatchResponse of
+    Right response ->
+      return response.sendJsonBatchResponse_handle
+    Left retryInfo ->
+      retry retryInfo.retry_seconds $
         sendJsonBatchAsync backend repo batches opts
 
 sendJsonBatch
@@ -108,11 +108,11 @@ sendBatchDescriptorAsync backend repo descriptor = do
   let batch = Thrift.EnqueueBatch_descriptor descriptor
   r <- try $ enqueueBatchDescriptor backend repo batch
     Thrift.EnqueueBatchWaitPolicy_Remember
-  case r of
-    Right Thrift.EnqueueBatchResponse{..} ->
-      return enqueueBatchResponse_handle
-    Left Thrift.Retry{..} ->
-      retry retry_seconds $
+  case r :: Either Thrift.Retry Thrift.EnqueueBatchResponse of
+    Right response ->
+      return response.enqueueBatchResponse_handle
+    Left retryInfo ->
+      retry retryInfo.retry_seconds $
         sendBatchDescriptorAsync backend repo descriptor
 
 retry :: Double -> IO a -> IO a
@@ -127,9 +127,9 @@ waitBatch
   -> IO Thrift.Subst
 waitBatch backend handle = do
   e <- try $ pollBatch backend handle
-  case e of
-    Left Thrift.Retry{..} ->
-      retry retry_seconds $ waitBatch backend handle
+  case e :: Either Thrift.Retry Thrift.FinishResponse of
+    Left retryInfo ->
+      retry retryInfo.retry_seconds $ waitBatch backend handle
     Right r -> case r of
       Thrift.FinishResponse_subst subst -> return subst
       Thrift.FinishResponse_retry (Thrift.BatchRetry r) ->

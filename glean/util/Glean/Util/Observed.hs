@@ -22,7 +22,7 @@ import Util.STM
 
 -- | A value that may change over time, and that we can observe efficiently.
 data Observed a = Observed
-  { observedGet :: STM a
+  { _observedGet :: STM a
   , observedUpdated :: Maybe (IORef (IO ()))
     -- invoked when the value is updated
   }
@@ -58,8 +58,8 @@ instance Functor Observed where
 -- * Multiple instances of the action may run concurrently
 --
 doOnUpdate :: Observed a -> IO () -> IO ()
-doOnUpdate Observed{..} action =
-  forM_ observedUpdated $ \ref ->
+doOnUpdate observed action =
+  forM_ observed.observedUpdated $ \ref ->
     atomicModifyIORef' ref $ \io -> (io >> action, ())
 
 -- | Monads which can 'get' the current value of an 'Observed'

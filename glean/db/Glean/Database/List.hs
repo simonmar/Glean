@@ -27,13 +27,13 @@ import qualified Glean.Types as Thrift
 
 
 listDatabases :: Env -> Thrift.ListDatabases -> IO Thrift.ListDatabasesResult
-listDatabases env@Env{..} Thrift.ListDatabases{..} = do
+listDatabases env listDatabasesReq = do
   backups <-
-    if listDatabases_includeBackups
+    if listDatabasesReq.listDatabases_includeBackups
       then do
         -- Use the cache of restorable DBs populated by the janitor,
         -- if one is available.
-        maybeLastFetch <- readTVarIO envCachedRestorableDBs
+        maybeLastFetch <- readTVarIO env.envCachedRestorableDBs
         restorables <- case maybeLastFetch of
           Just (_, dbs) -> return $ HashMap.fromList dbs
           Nothing -> do
@@ -42,7 +42,7 @@ listDatabases env@Env{..} Thrift.ListDatabases{..} = do
         return $ reposToResults restorables
       else
         return mempty
-  local <- atomically $ Catalog.getLocalDatabases envCatalog
+  local <- atomically $ Catalog.getLocalDatabases env.envCatalog
   let databases =
         HashMap.elems $
         fmap Thrift.getDatabaseResult_database $

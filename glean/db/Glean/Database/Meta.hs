@@ -96,22 +96,22 @@ metaToThriftDatabase
   -> Repo
   -> Meta
   -> Database
-metaToThriftDatabase status expire repo Meta{..} = Database
+metaToThriftDatabase status expire repo meta = Database
   { database_repo = repo
   , database_status = status
-  , database_location = metaBackup
-  , database_created_since_epoch = metaCreated
+  , database_location = meta.metaBackup
+  , database_created_since_epoch = meta.metaCreated
   , database_expire_time = utcTimeToPosixEpochTime <$> expire
-  , database_properties = metaProperties
-  , database_completed = case metaCompleteness of
+  , database_properties = meta.metaProperties
+  , database_completed = case meta.metaCompleteness of
       Complete DatabaseComplete{databaseComplete_time=t} -> Just t
       _ -> Nothing
-  , database_repo_hash_time = metaRepoHashTime
-  , database_dependencies = metaDependencies
-  , database_broken = case metaCompleteness of
+  , database_repo_hash_time = meta.metaRepoHashTime
+  , database_dependencies = meta.metaDependencies
+  , database_broken = case meta.metaCompleteness of
       Broken broken -> Just broken
       _ -> Nothing
-  , database_complete = case metaCompleteness of
+  , database_complete = case meta.metaCompleteness of
       Complete complete -> Just complete
       _ -> Nothing
   }

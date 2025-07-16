@@ -189,13 +189,13 @@ data Derivation = Derivation
   }
 
 instance NFData Derivation where
-  rnf Derivation{..} =
-    derivationStart
-    `seq` derivationFinished
-    `seq` rnf derivationStats
-    `seq` rnf derivationPendingWrites
-    `seq` maybe () (`seq` ()) derivationError
-    `seq` derivationHandle
+  rnf derivation =
+    derivation.derivationStart
+    `seq` derivation.derivationFinished
+    `seq` rnf derivation.derivationStats
+    `seq` rnf derivation.derivationPendingWrites
+    `seq` maybe () (`seq` ()) derivation.derivationError
+    `seq` derivation.derivationHandle
     `seq`()
 
 data EnableRecursion
@@ -268,5 +268,5 @@ data Env = forall storage. Storage storage => Env
   }
 
 instance Show Env where
-  show Env{..} = unwords [ "Glean.Database.Types.Env {",
+  show (Env { envStorage = envStorage }) = unwords [ "Glean.Database.Types.Env {",
     "envStorage: " <> describe envStorage, "}" ]

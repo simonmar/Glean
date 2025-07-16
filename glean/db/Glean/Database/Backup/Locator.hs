@@ -59,7 +59,7 @@ toRepoLocator prefix site repo =
   toSiteLocator prefix site <> "/" <> repoToTextSep "." repo
 
 getSite :: Env -> Text -> STM (Maybe (Text, Some Site))
-getSite Env{..} repoName = do
+getSite env@(Env{envServerConfig, envBackupBackends}) repoName = do
   policy <- ServerConfig.config_backup <$> Observed.get envServerConfig
   let locator = Map.findWithDefault
         (databaseBackupPolicy_location policy)
@@ -69,7 +69,7 @@ getSite Env{..} repoName = do
   return $ fromSiteLocator envBackupBackends locator
 
 getAllSites :: Env -> STM [(Text, Some Site)]
-getAllSites Env{..} = do
+getAllSites env@(Env{envServerConfig, envBackupBackends}) = do
   policy <- ServerConfig.config_backup <$> Observed.get envServerConfig
   return $
     mapMaybe (fromSiteLocator envBackupBackends) $

@@ -269,7 +269,7 @@ instance Bifunctor Match where
     MatchAnd a b -> MatchAnd (fmap (bimap f g) a) (fmap (bimap f g) b)
     MatchPrefix b term -> MatchPrefix b $ fmap (bimap f g) term
     MatchArrayPrefix ty prefix all ->
-      MatchArrayPrefix ty ((fmap.fmap) (bimap f g) prefix)
+      MatchArrayPrefix ty ((fmap . fmap) (bimap f g) prefix)
         (fmap (bimap f g) all)
 
 instance Bifoldable Match where
@@ -283,7 +283,7 @@ instance Bifoldable Match where
     MatchAnd a b -> foldMap (bifoldMap f g) a <> foldMap (bifoldMap f g) b
     MatchPrefix _ term -> foldMap (bifoldMap f g) term
     MatchArrayPrefix _ty pre all ->
-      (foldMap.foldMap) (bifoldMap f g) pre <> foldMap (bifoldMap f g) all
+      (foldMap . foldMap) (bifoldMap f g) pre <> foldMap (bifoldMap f g) all
 
 instance Bitraversable Match where
   bitraverse f g = \case

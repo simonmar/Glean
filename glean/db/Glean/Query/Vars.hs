@@ -141,7 +141,7 @@ freshWild pat = mapM freshWildMatch pat
     MatchPrefix str rest -> MatchPrefix str <$> mapM freshWildMatch rest
     MatchArrayPrefix ty pre all ->
       MatchArrayPrefix ty
-        <$> (mapM.mapM) freshWildMatch pre
+        <$> (mapM . mapM) freshWildMatch pre
         <*> mapM freshWildMatch all
     MatchNever ty -> return (MatchNever ty)
     MatchFid f -> return (MatchFid f)

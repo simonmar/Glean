@@ -147,9 +147,9 @@ writeSendQueueJson sq json callback =
   where
   -- size is approximate for JSON
   size = sum (map jsonFactBatchSize json)
-  jsonFactBatchSize Thrift.JsonFactBatch{..} =
-    sum (map BS.length jsonFactBatch_facts) +
-    maybe 0 BS.length jsonFactBatch_unit
+  jsonFactBatchSize jsonFactBatch =
+    sum (map BS.length jsonFactBatch.jsonFactBatch_facts) +
+    maybe 0 BS.length jsonFactBatch.jsonFactBatch_unit
 
 writeSendQueueDescriptor
   :: SendQueue
@@ -231,22 +231,22 @@ pollFromWaitQueue backend settings sq = do
       _ -> return ())
     $ \r ->
     case r of
-      Just Wait{..} -> do
-        result <- try $ waitBatch backend waitHandle
-        let !size = batchSize waitOriginalBatch
+      Just waitInfo -> do
+        result <- try $ waitBatch backend waitInfo.waitHandle
+        let !size = batchSize waitInfo.waitOriginalBatch
         case result of
           Left e@Thrift.UnknownBatchHandle{} -> do
             logWarning $ "Server forgot batch; resending (" <> show e <> ")"
             atomically $ do
               -- don't writeSendQueue; retries should work even if the
               -- queue is in the Closed state and shutting down
-              writeTQueue (sqOutQueue sq) (waitOriginalBatch, waitCallback)
+              writeTQueue (sqOutQueue sq) (waitInfo.waitOriginalBatch, waitInfo.waitCallback)
               return True
           Right subst -> do
             atomically $ do
-              waitCallback $ Right subst
+              waitInfo.waitCallback $ Right subst
               releaseBatch sq size
-            elapsed <- getElapsedTime waitStart
+            elapsed <- getElapsedTime waitInfo.waitStart
             sendQueueLog settings $ SendQueueSent size elapsed
             return True
 
@@ -337,29 +337,29 @@ withSendQueue
   -> SendQueueSettings
   -> (SendQueue -> IO a)
   -> IO a
-withSendQueue backend repo settings@SendQueueSettings{..} action =
+withSendQueue backend repo settings action =
   mask $ \restore -> do
-    q <- newSendQueue sendQueueMaxMemory sendQueueMaxBatches
-    let retryBackend = backendRetryWrites backend sendQueueRetry
-    withStats sendQueueLogStats q $ do
+    q <- newSendQueue settings.sendQueueMaxMemory settings.sendQueueMaxBatches
+    let retryBackend = backendRetryWrites backend settings.sendQueueRetry
+    withStats settings.sendQueueLogStats q $ do
       snd <$> Async.concurrently
         (Async.mapConcurrently_ id
           $ restore (pollFromWaitQueue retryBackend settings q)
           : replicate
-              sendQueueThreads
+              settings.sendQueueThreads
               (restore (sendFromQueue retryBackend repo settings q)))
         (restore (action q)
           `finally` atomically (closeSendQueue q))
 
 withStats :: Bool -> SendQueue -> IO a -> IO a
-withStats on SendQueue{..} act = do
+withStats on sendQueue act = do
   verbose <- vlogIsOn 1
   if on || verbose
     then Async.withAsync (forever $ logQueueStats >> sleep 10) $ \_ -> act
     else act
   where
   logQueueStats = do
-    count <- readTVarIO sqCount
-    memory <- readTVarIO sqMemory
+    count <- readTVarIO sendQueue.sqCount
+    memory <- readTVarIO sendQueue.sqMemory
     logInfo $ printf "count:%d/%d memory:%d/%d"
-      count sqMaxCount memory sqMaxMemory
+      count sendQueue.sqMaxCount memory sendQueue.sqMaxMemory

@@ -253,8 +253,8 @@ maybeFlush w callback action = modifyMVar_ (writerFacts w) $ \facts -> do
 -- matches the DB's schema, so we can catch schema mismatches before
 -- we get (de)serialization errors.
 addSchemaId :: Sender -> Thrift.Batch -> Thrift.Batch
-addSchemaId Sender{..} batch =
-  batch { Thrift.batch_schema_id = Backend.schemaId senderBackend }
+addSchemaId sender batch =
+  batch { Thrift.batch_schema_id = Backend.schemaId sender.senderBackend }
 
 -- | Write facts to a Repo using an asynchronous sender, with all the
 -- default settings.

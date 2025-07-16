@@ -81,14 +81,14 @@ new ps = unsafePerformIO $ withMany predicate ps $ \qs ->
     p_trs
   where
     !n = length ps
-    predicate CompiledPredicate{..} f =
-      withUTF8Text (predicateRef_name compiledRef) $ \name_ptr name_size ->
-      with compiledTypecheck $ \tc_ptr ->
-      with compiledTraversal $ \tr_ptr ->
-      f ( compiledPid
+    predicate compiledPredicate f =
+      withUTF8Text (predicateRef_name compiledPredicate.compiledRef) $ \name_ptr name_size ->
+      with compiledPredicate.compiledTypecheck $ \tc_ptr ->
+      with compiledPredicate.compiledTraversal $ \tr_ptr ->
+      f ( compiledPredicate.compiledPid
         , name_ptr
         , name_size
-        , fromIntegral $ predicateRef_version compiledRef
+        , fromIntegral $ predicateRef_version compiledPredicate.compiledRef
         , tc_ptr
         , tr_ptr )
 
@@ -139,14 +139,14 @@ instance Default Validate where
     }
 
 validate :: CanLookup a => Inventory -> Validate -> a -> IO ()
-validate inventory Validate{..} lookupable =
+validate inventory validateOpts lookupable =
   with inventory $ \inventory_ptr ->
   withLookup lookupable $ \lookup ->
   invoke $ glean_validate
     inventory_ptr
-    (if validateTypecheck then 1 else 0)
-    (if validateKeys then 1 else 0)
-    (maybe maxBound fromIntegral validateLimit)
+    (if validateOpts.validateTypecheck then 1 else 0)
+    (if validateOpts.validateKeys then 1 else 0)
+    (maybe maxBound fromIntegral validateOpts.validateLimit)
     lookup
 
 foreign import ccall unsafe glean_inventory_new

@@ -96,12 +96,12 @@ runQueryPage be repo cont (Query query) = do
           UserQueryEncoding_bin def
         ]
       }
-  UserQueryResults{..} <- userQuery be repo query'
-  mapM_ reportUserQueryStats userQueryResults_stats
-  mapM_ (vlog 1) userQueryResults_diagnostics
-  mapM_ (waitBatch be) userQueryResults_handle
-  let results = decodeResults userQueryResults_results decodeAsFact
-  return (results, userQueryResults_continuation)
+  queryResults <- userQuery be repo query'
+  mapM_ reportUserQueryStats queryResults.userQueryResults_stats
+  mapM_ (vlog 1) queryResults.userQueryResults_diagnostics
+  mapM_ (waitBatch be) queryResults.userQueryResults_handle
+  let results = decodeResults queryResults.userQueryResults_results decodeAsFact
+  return (results, queryResults.userQueryResults_continuation)
 
 
 -- | Perform a query and map an IO function over the results, running the

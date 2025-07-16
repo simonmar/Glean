@@ -333,20 +333,20 @@ senderRebaseAndFlush wait srq sender = do
     where log msg = vlog 1 $ "Sender " <> show (sId sender) <> ": " <> msg
 
 updateLookupCacheStats :: SendAndRebaseQueue -> IO ()
-updateLookupCacheStats SendAndRebaseQueue{..} =
-  forM_ srqStats $ \stats -> do
-    statValues <- LookupCache.readStatsAndResetCounters srqCacheStats
+updateLookupCacheStats srq =
+  forM_ srq.srqStats $ \stats -> do
+    statValues <- LookupCache.readStatsAndResetCounters srq.srqCacheStats
     Stats.bump stats Stats.lookupCacheStats (countFailuresAsMisses statValues)
 
 statTick :: SendAndRebaseQueue -> Bump Tick -> Word64 -> IO a -> IO a
-statTick SendAndRebaseQueue{..} bump val act =
-  case srqStats of
+statTick srq bump val act =
+  case srq.srqStats of
     Nothing -> act
     Just stats -> Stats.tick stats bump val act
 
 statBump :: SendAndRebaseQueue -> Bump Tick -> Tick -> IO ()
-statBump SendAndRebaseQueue{..} bump val =
-  case srqStats of
+statBump srq bump val =
+  case srq.srqStats of
     Nothing -> return ()
     Just stats -> Stats.bump stats bump val
 
@@ -385,23 +385,22 @@ withSendAndRebaseQueue
   -> (SendAndRebaseQueue -> IO a)
   -> IO a
 withSendAndRebaseQueue backend repo inventory settings action = do
-  vlog 1 $ "Allow remote refs: " <> show sendAndRebaseQueueAllowRemoteReferences
-  SendQueue.withSendQueue backend repo sendAndRebaseQueueSendQueueSettings $
+  vlog 1 $ "Allow remote refs: " <> show settings.sendAndRebaseQueueAllowRemoteReferences
+  SendQueue.withSendQueue backend repo settings.sendAndRebaseQueueSendQueueSettings $
     \sendQueue -> do
       cacheStats <- LookupCache.newStats
-      let cacheSize = fromIntegral sendAndRebaseQueueFactCacheSize
+      let cacheSize = fromIntegral settings.sendAndRebaseQueueFactCacheSize
       srq <- SendAndRebaseQueue
         <$> pure sendQueue
         <*> newTQueueIO
         <*> pure inventory
         <*> LookupCache.new cacheSize 1 cacheStats
         <*> pure cacheStats
-        <*> pure sendAndRebaseQueueStats
-        <*> pure sendAndRebaseQueueFactBufferSize
+        <*> pure settings.sendAndRebaseQueueStats
+        <*> pure settings.sendAndRebaseQueueFactBufferSize
       bracket_ (createSenderPool srq) (deleteSenderPool srq) $
         action srq
     where
-      SendAndRebaseQueueSettings{..} = settings
       createSenderPool srq =
         forM_ senderIds $ \i -> do
           factset <- FactSet.new baseId
@@ -416,9 +415,9 @@ withSendAndRebaseQueue backend repo inventory settings action = do
           -- don't deadlock here in case we died leaving the queue empty
           sender <- atomically $ tryReadTQueue (srqSenders srq)
           forM_ sender $ senderRebaseAndFlush True srq
-      senderIds = take sendAndRebaseQueueSenders [1..]
+      senderIds = take settings.sendAndRebaseQueueSenders [1..]
 
-      baseId = if sendAndRebaseQueueAllowRemoteReferences
+      baseId = if settings.sendAndRebaseQueueAllowRemoteReferences
         then firstLocalId
         else Fid Thrift.fIRST_FREE_ID
 

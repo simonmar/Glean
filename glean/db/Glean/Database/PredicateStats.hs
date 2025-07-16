@@ -28,10 +28,10 @@ predicateStats
   -> IO (Map Id PredicateStats)
 predicateStats env repo opts = case opts of
   ExcludeBase -> do
-    withOpenDatabase env repo $ \OpenDB{..} ->
-      Map.fromList . coerce <$> Storage.predicateStats odbHandle
+    withOpenDatabase env repo $ \odb ->
+      Map.fromList . coerce <$> Storage.predicateStats odb.odbHandle
 
   IncludeBase -> do
-    statsList <- withOpenDatabaseStack env repo $ \OpenDB{..} ->
-      Storage.predicateStats odbHandle
+    statsList <- withOpenDatabaseStack env repo $ \odb ->
+      Storage.predicateStats odb.odbHandle
     return $ Map.fromListWith (<>) $ coerce $ concat statsList

@@ -82,21 +82,21 @@ instance Hashable (Query a) where
 decodeResults :: UserQueryEncodedResults -> ResultDecoder a -> IO [a]
 decodeResults results decoder =
   case results of
-    UserQueryEncodedResults_bin UserQueryResultsBin{..} -> do
+    UserQueryEncodedResults_bin queryResultsBin -> do
       cacheRef <- newIORef IntMap.empty
       let serialized = IntMap.fromList
             [ (fromIntegral id,f)
-            | (id,f) <- Map.toList userQueryResultsBin_nestedFacts ]
-      forM (Map.toList userQueryResultsBin_facts) $ \(fid, fact) -> do
+            | (id,f) <- Map.toList queryResultsBin.userQueryResultsBin_nestedFacts ]
+      forM (Map.toList queryResultsBin.userQueryResultsBin_facts) $ \(fid, fact) -> do
         liftIO $ decoder serialized cacheRef (Typed.IdOf (Fid fid)) fact
 
-    UserQueryEncodedResults_listbin UserQueryResultsListBin{..} -> do
+    UserQueryEncodedResults_listbin queryResultsListBin -> do
       cacheRef <- newIORef IntMap.empty
       let serialized = IntMap.fromList
             [ (fromIntegral id,f)
-            | (id,f) <- Map.toList userQueryResultsListBin_nestedFacts ]
-          fids = Vector.toList userQueryResultsListBin_ids
-          facts = Vector.toList userQueryResultsListBin_facts
+            | (id,f) <- Map.toList queryResultsListBin.userQueryResultsListBin_nestedFacts ]
+          fids = Vector.toList queryResultsListBin.userQueryResultsListBin_ids
+          facts = Vector.toList queryResultsListBin.userQueryResultsListBin_facts
           f fid fact = liftIO $
             decoder serialized cacheRef (Typed.IdOf (Fid fid)) fact
       zipWithM f fids facts
@@ -106,7 +106,7 @@ decodeResults results decoder =
 
 -- | A human-readable form of the Query.
 displayQuery :: Query a -> Text
-displayQuery (Query UserQuery{..}) = Text.decodeUtf8 userQuery_query
+displayQuery (Query userQuery) = Text.decodeUtf8 userQuery.userQuery_query
 
 allFacts :: forall q . (Predicate q) => Query q
 allFacts = angle $ Text.pack $
@@ -234,8 +234,8 @@ reportUserQueryStats stats =
   vlog 1 $ showUserQueryStats stats
 
 showUserQueryStats :: Thrift.UserQueryStats -> String
-showUserQueryStats Thrift.UserQueryStats{..} =
+showUserQueryStats stats =
   printf "%d facts, %.2fms, %ld bytes\n"
-    userQueryStats_num_facts
-    (realToFrac userQueryStats_elapsed_ns / 1000000 :: Double)
-    userQueryStats_allocated_bytes
+    stats.userQueryStats_num_facts
+    (realToFrac stats.userQueryStats_elapsed_ns / 1000000 :: Double)
+    stats.userQueryStats_allocated_bytes

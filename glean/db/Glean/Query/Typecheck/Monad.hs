@@ -125,10 +125,10 @@ initialTypecheckState
   -> ToRtsType
   -> TcMode
   -> TypecheckState
-initialTypecheckState tcEnv TcOpts{..} rtsType mode = TypecheckState
+initialTypecheckState tcEnv tcOpts rtsType mode = TypecheckState
   { tcEnv = tcEnv
-  , tcAngleVersion = tcOptAngleVersion
-  , tcDebug = Config.tcDebug tcOptDebug
+  , tcAngleVersion = tcOpts.tcOptAngleVersion
+  , tcDebug = Config.tcDebug tcOpts.tcOptDebug
   , tcRtsType = rtsType
   , tcNextVar = 0
   , tcNextTyVar = 0
@@ -148,8 +148,8 @@ initialTypecheckState tcEnv TcOpts{..} rtsType mode = TypecheckState
 
 getPredicateDetails :: PredicateId -> T PredicateDetails
 getPredicateDetails pred = do
-  TcEnv{..} <- gets tcEnv
-  case HashMap.lookup pred tcEnvPredicates of
+  tcEnv <- gets tcEnv
+  case HashMap.lookup pred tcEnv.tcEnvPredicates of
     Nothing -> error $ "predicateKeyTYpe: " <> show (displayDefault pred)
     Just d -> return d
 

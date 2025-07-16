@@ -132,23 +132,23 @@ resolveSchema :: SourceSchemas -> Either Text ResolvedSchemas
 resolveSchema schemas = runExcept $ do
   checkAngleVersion (srcAngleVersion schemas)
 
-  SourceSchemas{..} <- resolveSchemaRefs schemas
+  sourceSchemas <- resolveSchemaRefs schemas
 
   let
     -- dependency analysis: we want to process schemas in dependency
     -- order, and detect cycles in evolves declarations.
     sccs = stronglyConnComp
       [ (schema, schemaName schema, out schema)
-      | schema <- srcSchemas ]
+      | schema <- sourceSchemas.srcSchemas ]
 
     out s = schemaDependencies s <> evolvesOf (schemaName s)
 
-    schemaDependencies SourceSchema{..} =
-      schemaInherits ++ [ name | SourceImport name _ <- schemaDecls ]
+    schemaDependencies schema =
+      schema.schemaInherits ++ [ name | SourceImport name _ <- schema.schemaDecls ]
 
     evolves = HashMap.fromListWith (++)
       [ (new, [old])
-      | SourceEvolves _ new old <- srcEvolves
+      | SourceEvolves _ new old <- sourceSchemas.srcEvolves
       ]
 
     evolvesOf name = HashMap.lookupDefault [] name evolves
@@ -156,7 +156,7 @@ resolveSchema schemas = runExcept $ do
     resolveSchemas env [] = return env
     resolveSchemas env (AcyclicSCC one : rest) = do
       let schemaEvolves = HashMap.lookupDefault [] (schemaName one) evolves
-      resolved <- resolveOneSchema env srcAngleVersion
+      resolved <- resolveOneSchema env sourceSchemas.srcAngleVersion
         schemaEvolves one
       resolveSchemas (HashMap.insert (schemaName one) resolved env) rest
     resolveSchemas _ (CyclicSCC some : _) = throwError $
@@ -174,37 +174,37 @@ resolveSchema schemas = runExcept $ do
 
     allSchemas =
       [ schema
-      | schema@ResolvedSchema{..} <- HashMap.elems finalEnv
-      , resolvedSchemaName == "all"
+      | schema <- HashMap.elems finalEnv
+      , schema.resolvedSchemaName == "all"
       ]
 
-  when (srcAngleVersion >= AngleVersion 6) $
+  when (sourceSchemas.srcAngleVersion >= AngleVersion 6) $
     liftEither $ validateResolvedEvolutions resolved
 
   return ResolvedSchemas
     { schemasHighestVersion =
         if null allSchemas
            then Nothing
-           else Just (maximum $ map resolvedSchemaVersion allSchemas)
+           else Just (maximum $ map (.resolvedSchemaVersion) allSchemas)
     , schemasResolved = resolved
     }
 
 
 resolveSchemaRefs :: SourceSchemas -> Except Text SourceSchemas
-resolveSchemaRefs SourceSchemas{..} = do
+resolveSchemaRefs sourceSchemas = do
   let
      unqualMap
-       | srcAngleVersion >= AngleVersion 10 =
+       | sourceSchemas.srcAngleVersion >= AngleVersion 10 =
          HashMap.fromListWith (<>)
            [ (SourceRef name Nothing, HashSet.singleton ref)
-           | SourceSchema{..} <- srcSchemas
-           , let ref@(SourceRef name _) = schemaName
+           | schema <- sourceSchemas.srcSchemas
+           , let ref@(SourceRef name _) = schema.schemaName
            ]
        | otherwise = HashMap.empty
 
      refMap = unqualMap <> HashMap.fromList
-       [ (schemaName, HashSet.singleton schemaName)
-       | SourceSchema{..} <- srcSchemas
+       [ (schema.schemaName, HashSet.singleton schema.schemaName)
+       | schema <- sourceSchemas.srcSchemas
        ]
 
      schemaByName ref =
@@ -229,21 +229,21 @@ resolveSchemaRefs SourceSchemas{..} = do
      resolveEvolve (SourceEvolves l n o) =
        SourceEvolves l <$> schemaByName n <*> schemaByName o
 
-     resolveSchema SourceSchema{..} = do
-       inherits <- mapM (schemaByNameWithNamespace schemaName) schemaInherits
-       decls <- mapM (resolveDecl schemaName) schemaDecls
+     resolveSchema schema = do
+       inherits <- mapM (schemaByNameWithNamespace schema.schemaName) schema.schemaInherits
+       decls <- mapM (resolveDecl schema.schemaName) schema.schemaDecls
        return SourceSchema
-         { schemaName = schemaName
+         { schemaName = schema.schemaName
          , schemaInherits = inherits
          , schemaDecls = decls
-         , schemaSrcSpan = schemaSrcSpan
+         , schemaSrcSpan = schema.schemaSrcSpan
          }
 
-  schemas <- traverse resolveSchema srcSchemas
-  evolves <- traverse resolveEvolve srcEvolves
+  schemas <- traverse resolveSchema sourceSchemas.srcSchemas
+  evolves <- traverse resolveEvolve sourceSchemas.srcEvolves
 
   return SourceSchemas
-    { srcAngleVersion = srcAngleVersion
+    { srcAngleVersion = sourceSchemas.srcAngleVersion
     , srcSchemas = schemas
     , srcEvolves = evolves
     }
@@ -257,11 +257,11 @@ resolveOneSchema
   -> SourceSchema
   -> Except Text ResolvedSchemaRef
 
-resolveOneSchema env angleVersion evolves SourceSchema{..} =
-  let inSchema e = throwError $ "In " <> showRef schemaName <> ":\n  " <> e in
+resolveOneSchema env angleVersion evolves sourceSchema =
+  let inSchema e = throwError $ "In " <> showRef sourceSchema.schemaName <> ":\n  " <> e in
   flip catchError inSchema $ do
   let
-    SourceRef namespace maybeVer = schemaName
+    SourceRef namespace maybeVer = sourceSchema.schemaName
 
     schemaByName name = case HashMap.lookup name env of
       Nothing -> throwError $ "unknown schema: " <> showRef name
@@ -271,14 +271,14 @@ resolveOneSchema env angleVersion evolves SourceSchema{..} =
 
   -- Version of this schema
   version <- case maybeVer of
-    Nothing -> throwError $ "missing version: " <> showRef schemaName
+    Nothing -> throwError $ "missing version: " <> showRef sourceSchema.schemaName
     Just v -> return v
 
   -- All the schemas we're inheriting from
-  inherits <- traverse schemaByName schemaInherits
+  inherits <- traverse schemaByName sourceSchema.schemaInherits
 
   -- All the schemas we imported
-  imports <- traverse schemaByName [ name | SourceImport name _ <- schemaDecls ]
+  imports <- traverse schemaByName [ name | SourceImport name _ <- sourceSchema.schemaDecls ]
 
   let
     qualify :: Name -> Name
@@ -296,7 +296,7 @@ resolveOneSchema env angleVersion evolves SourceSchema{..} =
           qname = qualify name
         in
           (name, PredicateRef qname thisVersion, p)
-      | SourcePredicate p <- schemaDecls
+      | SourcePredicate p <- sourceSchema.schemaDecls
       ]
 
     localTypes =
@@ -306,7 +306,7 @@ resolveOneSchema env angleVersion evolves SourceSchema{..} =
           qname = qualify name
         in
           (name, TypeRef qname thisVersion, p)
-      | SourceType p <- schemaDecls
+      | SourceType p <- sourceSchema.schemaDecls
       ]
 
   -- Check for multiple definitions of the same name/version.
@@ -315,10 +315,10 @@ resolveOneSchema env angleVersion evolves SourceSchema{..} =
   -- using an explicit version.
   let
     numRefs = HashMap.fromListWith (+) $
-      [ ((predicateRef_name, predicateRef_version), 1::Int)
-      | (_, PredicateRef{..}, _) <- localPreds ] ++
-      [ ((typeRef_name, typeRef_version), 1)
-      | (_, TypeRef{..}, _) <- localTypes]
+      [ ((predicateRef.predicateRef_name, predicateRef.predicateRef_version), 1::Int)
+      | (_, predicateRef, _) <- localPreds ] ++
+      [ ((typeRef.typeRef_name, typeRef.typeRef_version), 1)
+      | (_, typeRef, _) <- localTypes]
   forM_ (HashMap.toList numRefs) $ \((name,ver), num) -> do
     when (num > 1) $ throwError $
       "multiple definitions for: " <> name <> "." <> showt ver
@@ -389,27 +389,27 @@ resolveOneSchema env angleVersion evolves SourceSchema{..} =
 
   -- resolve type definitions
   types <- forM localTypes $
-    \(name, ref, TypeDef{..}) -> do
+    \(name, ref, typeDef) -> do
       checkName name
-      type' <- runResolve angleVersion scope (resolveType typeDefType)
+      type' <- runResolve angleVersion scope (resolveType typeDef.typeDefType)
       return (name, TypeDef
         { typeDefRef = ref
         , typeDefType = type'
-        , typeDefSrcSpan = typeDefSrcSpan })
+        , typeDefSrcSpan = typeDef.typeDefSrcSpan })
 
   -- resolve predicate definitions
   predicates <- forM localPreds $
-    \(name, ref, PredicateDef{..}) -> do
+    \(name, ref, predicateDef) -> do
       checkName name
       runResolve angleVersion scope $ do
-        key <- resolveType predicateDefKeyType
-        value <- resolveType predicateDefValueType
+        key <- resolveType predicateDef.predicateDefKeyType
+        value <- resolveType predicateDef.predicateDefValueType
         return (name, PredicateDef
           { predicateDefRef = ref
           , predicateDefKeyType = key
           , predicateDefValueType = value
           , predicateDefDeriving = NoDeriving
-          , predicateDefSrcSpan = predicateDefSrcSpan })
+          , predicateDefSrcSpan = predicateDef.predicateDefSrcSpan })
 
   let
     -- scope of predicates that we can specify queries for. Namely
@@ -422,51 +422,51 @@ resolveOneSchema env angleVersion evolves SourceSchema{..} =
 
   -- resolve queries
   localDeriving <-
-    forM [ (derivingDefRef,derive)
-      | SourceDeriving derive@DerivingDef{..} <- schemaDecls ] $
-    \(ref, DerivingDef{..}) -> do
+    forM [ (derive.derivingDefRef,derive)
+      | SourceDeriving derive <- sourceSchema.schemaDecls ] $
+    \(ref, derivingDef) -> do
       ty <- lookupResultToExcept ref $ predScope ref
       ref <- case ty of
         RefPred ref -> return ref
         _ -> throwError $ showRef ref <> " is not a predicate"
       resolvedDerInfo <- runResolve angleVersion scope $
-        resolveDeriving derivingDefDeriveInfo
-      return (ref, DerivingDef ref resolvedDerInfo derivingDefSrcSpan)
+        resolveDeriving derivingDef.derivingDefDeriveInfo
+      return (ref, DerivingDef ref resolvedDerInfo derivingDef.derivingDefSrcSpan)
 
   let
     localTypeNames = HashSet.fromList $
       map (typeRef_name . typeDefRef . snd) types
 
     localTypes = HashMap.fromList
-      [ (typeDefRef def, def) | (_, def) <- types ]
+      [ (def.typeDefRef, def) | (_, def) <- types ]
 
     -- The types we re-export from this schema are all the types that
     -- are inherited but not shadowed by a locally-defined type.
     reExportedTypes =
       HashMap.fromList
-        [ (typeDefRef def, def)
+        [ (def.typeDefRef, def)
         | schema <- inherits
         , (ref, def) <- HashMap.toList $
             resolvedSchemaTypes schema <>
             resolvedSchemaReExportedTypes schema
-        , not (typeRef_name ref `HashSet.member` localTypeNames)
+        , not (ref.typeRef_name `HashSet.member` localTypeNames)
         ]
 
     localPredicateNames = HashSet.fromList $
-      [ predicateRef_name (predicateDefRef def) | (_, def) <- predicates ]
+      [ (def.predicateDefRef).predicateRef_name | (_, def) <- predicates ]
 
     localPredicates = HashMap.fromList
-      [ (predicateDefRef def, def) | (_, def) <- predicates ]
+      [ (def.predicateDefRef, def) | (_, def) <- predicates ]
 
     -- Similarly for predicates.
     reExportedPredicates =
       HashMap.fromList
-        [ (predicateDefRef def, def)
+        [ (def.predicateDefRef, def)
         | schema <- inherits
         , (ref, def) <- HashMap.toList $
             resolvedSchemaPredicates schema <>
             resolvedSchemaReExportedPredicates schema
-        , not (predicateRef_name ref `HashSet.member` localPredicateNames)
+        , not (ref.predicateRef_name `HashSet.member` localPredicateNames)
         ]
 
     exportedUnqualScope = HashMap.union unqualLocalScope unqualInheritedScope

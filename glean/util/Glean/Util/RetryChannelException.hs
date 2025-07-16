@@ -49,24 +49,24 @@ logRetry ex n maxRetries maybeDelay = do
     Just delay -> printf ", retry after %.2fs" delay
 
 retryChannelExceptions :: RetryPolicy -> IO a -> IO a
-retryChannelExceptions r@RetryPolicy{..} act = go 1
+retryChannelExceptions r act = go 1
   where
   go n = do -- attempt number n
     e <- try act
     case e of
       Right x -> return x
       Left ex@ChannelException{}
-        | n > maxRetries -> do
-          onError ex n maxRetries Nothing
+        | n > r.maxRetries -> do
+          r.onError ex n r.maxRetries Nothing
           throwIO ex
         | otherwise -> do
           delay <- retryDuration r n
-          onError ex n maxRetries (Just delay)
+          r.onError ex n r.maxRetries (Just delay)
           sleep delay
           go (n+1)
 
 retryDuration :: RetryPolicy -> Int -> IO Double
-retryDuration RetryPolicy{..} n = do
-  randomJitter <- randomRIO (-retryJitter, retryJitter)
-  let dur = exp randomJitter * minRetryDelay * 2^(n-1)
-  return $! max minRetryDelay $ min maxRetryDelay dur
+retryDuration retryPolicy n = do
+  randomJitter <- randomRIO (-retryPolicy.retryJitter, retryPolicy.retryJitter)
+  let dur = exp randomJitter * retryPolicy.minRetryDelay * 2^(n-1)
+  return $! max retryPolicy.minRetryDelay $ min retryPolicy.maxRetryDelay dur
