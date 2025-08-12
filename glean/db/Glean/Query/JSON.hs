@@ -143,29 +143,29 @@ encodeFact
 {-# INLINE encodeFact #-}
 encodeFact
   expanded
-  PredicateDetails{..}
+  predicateDetails
   fid
   key
   value
-  encoder@Encoder{..} = stToIO $
+  encoder = stToIO $
     RTS.withDecoder key $ \dkey ->
     RTS.withDecoder value $ \dvalue ->
     Buffer.fillByteString 8 $ do
       -- NOTE: We hardcode the field numbers for id, key and value here.
-      encObjectBegin
-      encObjectField Nothing 1 "id" NatTy dkey
-        $ encNat $ fromIntegral $ fromFid fid
-      encObjectSep
-      encObjectField (Just 1) 2 "key" predicateKeyType dkey
-        $ encode expanded encoder dkey predicateKeyType
-      case predicateValueType of
+      (encObjectBegin encoder)
+      (encObjectField encoder) Nothing 1 "id" NatTy dkey
+        $ (encNat encoder) $ fromIntegral $ fromFid fid
+      (encObjectSep encoder)
+      (encObjectField encoder) (Just 1) 2 "key" predicateDetails.predicateKeyType dkey
+        $ encode expanded encoder dkey predicateDetails.predicateKeyType
+      case predicateDetails.predicateValueType of
         Schema.RecordTy [] -> return () -- omit "value" field if value is unit
         _other -> do
-          encObjectSep
-          encObjectField (Just 2) 3 "value"
-              predicateValueType dvalue
-            $ encode expanded encoder dvalue predicateValueType
-      encObjectEnd
+          (encObjectSep encoder)
+          (encObjectField encoder) (Just 2) 3 "value"
+              predicateDetails.predicateValueType dvalue
+            $ encode expanded encoder dvalue predicateDetails.predicateValueType
+      (encObjectEnd encoder)
 
 -- | Takes a Glean schema type and a value of that type, and fills a 'Buffer'
 -- with a blob that can be decoded into the appropriate native Client Type
@@ -181,26 +181,26 @@ encode
   -> Type
   -> Buffer.Fill s ()
 {-# INLINE encode #-}
-encode expanded Encoder{..} !d = enc
+encode expanded encoder !d = enc
   where
     enc typ = case typ of
       ByteTy -> do
         x <- liftST $ RTS.dByte d
-        encByte x
+        encByte encoder x
       NatTy{} -> do
         x <- liftST $ RTS.dNat d
-        encNat x
+        encNat encoder x
       StringTy{} -> do
         (x,n) <- liftST $ RTS.dTrustedStringRef d
-        encMangledString x $ fromIntegral n
+        encMangledString encoder x $ fromIntegral n
       ArrayTy elty -> do
         size <- liftST $ RTS.dArray d
         case elty of
           ByteTy{} -> do
             ref <- liftST $ RTS.dByteStringRef d size
-            encBinary ref
+            encBinary encoder ref
           _ -> do
-            encArrayBegin elty $ fromIntegral size
+            encArrayBegin encoder elty $ fromIntegral size
             case size of
               0 -> return ()
               1 -> enc elty
@@ -208,13 +208,13 @@ encode expanded Encoder{..} !d = enc
                 enc elty
                 let go 0 = return ()
                     go n = do
-                      encArraySep
+                      encArraySep encoder
                       enc elty
                       go (n-1)
                 go (size-1)
-            encArrayEnd
+            encArrayEnd encoder
       RecordTy fieldTys -> do
-        encObjectBegin
+        encObjectBegin encoder
         -- We need to carry both the current and previous field numbers as
         -- Thrift encodes deltas between those.
         let field prev (i, FieldDef name ety) = case ety of
@@ -225,24 +225,24 @@ encode expanded Encoder{..} !d = enc
                   else enc_field prev i name ety d
               ty -> enc_field prev i name ty d
         foldM_ field Nothing $ zip [1..] fieldTys
-        encObjectEnd
+        encObjectEnd encoder
       SumTy fieldTys -> do
         sel <- liftST $ RTS.dSelector d
-        encObjectBegin
+        encObjectBegin encoder
         void $ case atMay fieldTys (fromIntegral sel) of
           Just (FieldDef name ty) -> do
             enc_field Nothing (fromIntegral sel + 1) name ty d
           Nothing ->
             enc_field Nothing (length fieldTys + 1) "UNKNOWN" (RecordTy []) d
-        encObjectEnd
+        encObjectEnd encoder
       SetTy elty -> do
         size <- liftST $ RTS.dSet d
         case elty of
           ByteTy{} -> do
             ref <- liftST $ RTS.dByteStringRef d size
-            encBinary ref
+            encBinary encoder ref
           _ -> do
-            encSetBegin elty $ fromIntegral size
+            encSetBegin encoder elty $ fromIntegral size
             case size of
               0 -> return ()
               1 -> enc elty
@@ -250,29 +250,29 @@ encode expanded Encoder{..} !d = enc
                 enc elty
                 let go 0 = return ()
                     go n = do
-                      encSetSep
+                      encSetSep encoder
                       enc elty
                       go (n-1)
                 go (size-1)
-            encSetEnd
+            encSetEnd encoder
       NamedTy _ (ExpandedType _ ty) -> enc ty
       EnumeratedTy _ -> do
         x <- liftST $ RTS.dSelector d
-        encNat $ fromIntegral x
+        encNat encoder $ fromIntegral x
       MaybeTy{} -> liftST $ encodingError "unsupported Maybe"
       BooleanTy{} -> do
         x <- liftST $ RTS.dSelector d
-        encBool (x /= 0)
+        encBool encoder (x /= 0)
       PredicateTy{} -> do
         fid <- liftST $ RTS.dFact d
         let id = fromIntegral (fromFid fid)
         case IntMap.lookup id expanded of
           Just bs ->  Buffer.byteString bs
           Nothing -> do
-            encObjectBegin
-            encObjectField Nothing 1 "id" NatTy d
-              $ encNat $ fromIntegral id
-            encObjectEnd
+            encObjectBegin encoder
+            encObjectField encoder Nothing 1 "id" NatTy d
+              $ encNat encoder $ fromIntegral id
+            encObjectEnd encoder
       TyVar{} -> error "JSON.encode: TyVar"
       HasTy{} -> error "JSON.encode: HasTy"
       HasKey{} -> error "JSON.encode: HasKey"
@@ -280,8 +280,8 @@ encode expanded Encoder{..} !d = enc
 
     {-# INLINE enc_field #-}
     enc_field prev i name ty d = do
-      when (isJust prev) encObjectSep
-      encObjectField prev i name ty d $ enc ty
+      when (isJust prev) (encObjectSep encoder)
+      encObjectField encoder prev i name ty d $ enc ty
       return $ Just i
 
 jsonEncoder :: Bool -> Encoder

@@ -105,8 +105,8 @@ retentionChanges
 
     fetch =
       [ item
-      | (item@Item{..},_) <- keepInThisNode
-      , itemLocality == Cloud ]
+      | (item,_) <- keepInThisNode
+      , item.itemLocality == Cloud ]
 
     elsewhere =
       [ item
@@ -127,18 +127,18 @@ retentionChanges
   }
 
 repoStack :: DbIndex -> Item -> Maybe [Repo]
-repoStack index@DbIndex{..} Item{..} =
-  case metaDependencies itemMeta of
-    Just (Dependencies_stacked Stacked{..}) -> do
-      let base = Repo stacked_name stacked_hash
-      baseItem <- Map.lookup base byRepo
+repoStack index item =
+  case metaDependencies item.itemMeta of
+    Just (Dependencies_stacked stacked) -> do
+      let base = Repo stacked.stacked_name stacked.stacked_hash
+      baseItem <- Map.lookup base index.byRepo
       rest <- repoStack index baseItem
       return (base : rest)
 
-    Just (Dependencies_pruned Pruned{..}) -> do
-      baseItem <- Map.lookup pruned_base byRepo
+    Just (Dependencies_pruned pruned) -> do
+      baseItem <- Map.lookup pruned.pruned_base index.byRepo
       rest <- repoStack index baseItem
-      return (pruned_base : rest)
+      return (pruned.pruned_base : rest)
     Nothing -> return []
 
 -- | Information about the set of DBs that we have
@@ -153,7 +153,11 @@ data DbIndex = DbIndex
   }
 
 dbIndex :: [Item] -> DbIndex
-dbIndex items = DbIndex{..}
+dbIndex items = DbIndex
+  { byRepo = byRepo
+  , byRepoName = byRepoName  
+  , dependencies = dependencies
+  }
   where
     byRepo =
       Map.fromListWith pickFromDuplicates
@@ -167,8 +171,8 @@ dbIndex items = DbIndex{..}
 
     dependencies = stacked . metaDependencies . itemMeta
 
-    stacked (Just (Dependencies_stacked Stacked{..})) =
-      [ Repo stacked_name stacked_hash `Map.lookup` byRepo ]
+    stacked (Just (Dependencies_stacked stacked)) =
+      [ Repo stacked.stacked_name stacked.stacked_hash `Map.lookup` byRepo ]
     stacked (Just (Dependencies_pruned update)) =
       [ pruned_base update `Map.lookup` byRepo ]
     stacked Nothing = []
@@ -184,16 +188,14 @@ computeRetentionSet
   -> DbIndex
   -> m [Item]
 computeRetentionSet config_retention config_restore
-    time isAvailableM dbIndex@DbIndex{..} =
+    time isAvailableM dbIndex =
   transitiveClosureBy itemRepo (catMaybes . depsRestored) <$>
-    concatMapM allRetention byRepoName
+    concatMapM allRetention dbIndex.byRepoName
   where
-    -- Add transitive dependencies of a DB to the retention set only
-    -- if the DB is local or will be restored.
     depsRestored :: Item -> [Maybe Item]
-    depsRestored item@Item{..}
-      | itemLocality == Local
-        || restorable config_restore itemRepo = dependencies item
+    depsRestored item
+      | item.itemLocality == Local
+        || restorable config_restore item.itemRepo = dbIndex.dependencies item
       | otherwise = []
 
     allRetention :: (Text, NonEmpty Item) -> m [Item]
@@ -214,17 +216,17 @@ dbRetentionForRepo
   -> NonEmpty Item
   -> DbIndex
   -> m [Item]
-dbRetentionForRepo ServerConfig.Retention{..} t isAvailableM dbs dbIndex = do
+dbRetentionForRepo retention t isAvailableM dbs dbIndex = do
   let
     -- retention policy parameters
-    retainAtLeast' = fromIntegral $ fromMaybe 0 retention_retain_at_least
-    retainAtMost' = fmap fromIntegral retention_retain_at_most
+    retainAtLeast' = fromIntegral $ fromMaybe 0 retention.retention_retain_at_least
+    retainAtMost' = fmap fromIntegral retention.retention_retain_at_most
     -- enforce invariant: atLeast <= atMost
     retainAtLeast = min retainAtLeast' (fromMaybe maxBound retainAtMost')
     retainAtMost  = max retainAtLeast' <$> retainAtMost'
-    deleteIfOlder = fmap fromIntegral retention_delete_if_older
+    deleteIfOlder = fmap fromIntegral retention.retention_delete_if_older
     deleteIncompleteIfOlder =
-      fmap fromIntegral retention_delete_incomplete_if_older
+      fmap fromIntegral retention.retention_delete_incomplete_if_older
 
     f &&& g = \x -> f x && g x
     f ||| g = \x -> f x || g x
@@ -235,18 +237,18 @@ dbRetentionForRepo ServerConfig.Retention{..} t isAvailableM dbs dbIndex = do
     ifSet Nothing _ = const False
 
     -- predicates
-    isLocal Item{..} = itemLocality == Local
-    isComplete Item{..} =
-      completenessStatus itemMeta == DatabaseStatus_Complete
-    isOlderThan secs Item{..} = dbAge t itemMeta >= secs
+    isLocal item = item.itemLocality == Local
+    isComplete item =
+      completenessStatus item.itemMeta == DatabaseStatus_Complete
+    isOlderThan secs item = dbAge t item.itemMeta >= secs
     isAvailable = isLocal |||> isAvailableM
     hasDependencies = not . missingDependencies dbIndex
 
     -- all DBs with the required/excluded properties, sorted by most recent first
     sorted =
       sortOn (Down . dbTime . itemMeta) $
-      filter (hasAllProperties retention_required_properties) $
-      filter (not . hasAnyProperties retention_excluded_properties) $
+      filter (hasAllProperties retention.retention_required_properties) $
+      filter (not . hasAnyProperties retention.retention_excluded_properties) $
       NonEmpty.toList dbs
 
     -- whether to delete a DB according to the deletion policy
@@ -278,11 +280,11 @@ dbRetentionForRepo ServerConfig.Retention{..} t isAvailableM dbs dbIndex = do
     atLeast ++ atLeastAvailable ++ atMost
 
 missingDependencies :: DbIndex -> Item -> Bool
-missingDependencies dbIndex item = any isNothing (dependencies dbIndex item)
+missingDependencies dbIndex item = any isNothing (dbIndex.dependencies item)
 
 hasProperty :: Item -> (Text, Text) -> Bool
-hasProperty Item{..} (name,val) =
-  HashMap.lookup name (metaProperties itemMeta) == Just val
+hasProperty item (name,val) =
+  HashMap.lookup name (metaProperties item.itemMeta) == Just val
 
 hasAllProperties :: HashMap.HashMap Text Text -> Item -> Bool
 hasAllProperties req item = all (hasProperty item) (HashMap.toList req)
@@ -295,21 +297,21 @@ repoRetention
   :: ServerConfig.DatabaseRetentionPolicy
   -> Text
   -> NonEmpty ServerConfig.Retention
-repoRetention ServerConfig.DatabaseRetentionPolicy{..} repoNm =
+repoRetention policy repoNm =
   case NonEmpty.nonEmpty (old_retention <> new_retention) of
-    Nothing -> databaseRetentionPolicy_default_retention :| []
+    Nothing -> policy.databaseRetentionPolicy_default_retention :| []
     Just some -> some
   where
   old_retention =
     maybeToList $
       Map.lookup
         repoNm
-        databaseRetentionPolicy_repos
+        policy.databaseRetentionPolicy_repos
   new_retention =
     Map.findWithDefault
       []
       repoNm
-      databaseRetentionPolicy_by_repo
+      policy.databaseRetentionPolicy_by_repo
 
 -- | Take the first n items that satisfy the predicate
 takeFilterM :: (Monad m) => Int -> (a -> m Bool) -> [a] -> m [a]

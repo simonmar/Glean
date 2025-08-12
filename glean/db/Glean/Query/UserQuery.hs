@@ -136,9 +136,9 @@ genericUserQuery
   -> IO Thrift.UserQueryResults
 {-# INLINE genericUserQuery #-}
 genericUserQuery env repo query enc = do
-  config@ServerConfig.Config{..} <- Observed.get (envServerConfig env)
+  config <- Observed.get (env.envServerConfig)
   readDatabaseWithBoundaries env repo $ \odb bounds lookup ->
-    maybe id limitAllocsThrow config_query_alloc_limit
+    maybe id limitAllocsThrow config.config_query_alloc_limit
       $ performUserQuery enc (odbSchema odb)
       $ userQueryImpl env odb config NoExtraSteps bounds lookup repo query
 
@@ -257,13 +257,13 @@ instance Encoding LegacyJSONEncoding where
     serialized
     fid
     predicateDetails
-    Thrift.Fact{..} = factToJSON
+    fact = factToJSON
       (Thrift.userQueryOptions_no_base64_binary opts)
       serialized
       predicateDetails
       fid
-      fact_key
-      fact_value
+      fact.fact_key
+      fact.fact_value
 
   setResults _ res qres = qres
       { Thrift.userQueryResults_facts = snd <$> resFacts res
@@ -277,14 +277,14 @@ instance Encoding Thrift.UserQueryEncodingJSON where
 
   shouldExpand = Thrift.userQueryEncodingJSON_expand_results
 
-  serializeFact enc serialized fid predicateDetails Thrift.Fact{..} =
+  serializeFact enc serialized fid predicateDetails fact =
     factToJSON
       (Thrift.userQueryEncodingJSON_no_base64_binary enc)
       serialized
       predicateDetails
       fid
-      fact_key
-      fact_value
+      fact.fact_key
+      fact.fact_value
 
   setResults enc res qres = qres
     { Thrift.userQueryResults_results = Thrift.UserQueryEncodedResults_json
@@ -302,13 +302,13 @@ instance Encoding Thrift.UserQueryEncodingCompact where
 
   shouldExpand = Thrift.userQueryEncodingCompact_expand_results
 
-  serializeFact _ serialized fid predicateDetails Thrift.Fact{..} =
+  serializeFact _ serialized fid predicateDetails fact =
     factToCompact
       serialized
       predicateDetails
       fid
-      fact_key
-      fact_value
+      fact.fact_key
+      fact.fact_value
 
   setResults enc res qres = qres
     { Thrift.userQueryResults_results = Thrift.UserQueryEncodedResults_compact
@@ -382,8 +382,8 @@ performUserQuery encoding schema query = do
     -- Convert nested facts - we do it in the order of their fact ids
     -- which means we can only depend on facts converted earlier.
     nested <- foldM
-      (\expanded (fid, fact@Thrift.Fact{..}) -> do
-          details <- pidDetails schema fact_type
+      (\expanded (fid, fact) -> do
+          details <- pidDetails schema fact.fact_type
           encoded <- serializeFact
             encoding
             (if shouldExpand encoding then expanded else IntMap.empty)
@@ -438,29 +438,29 @@ userQueryFactsImpl
      -- The length of the result list is guaranteed to be the same
      -- as the userQueryFacts_facts list in the input.
 userQueryFactsImpl
-    schema@DbSchema{..}
+    schema
     config
     lookup
-    query@Thrift.UserQueryFacts{..} = do
-  let opts = fromMaybe def userQueryFacts_options
+    query = do
+  let opts = fromMaybe def query.userQueryFacts_options
 
-  schemaSelector <- schemaVersionForQuery schema config userQueryFacts_schema_id
+  schemaSelector <- schemaVersionForQuery schema config query.userQueryFacts_schema_id
 
-  expandPids <- optsExpandPids opts schemaSelector schema
+  expandPids <- optsExpandPids opts schema.schemaSelector schema
   let limits = mkQueryRuntimeOptions opts config expandPids
 
   trans <- transformationsForQuery schema schemaSelector
 
-  vlog 2 $ "userQueryFactsImpl: " <> show (length userQueryFacts_facts)
-  (qResults@QueryResults{..}, fullScans) <- do
+  vlog 2 $ "userQueryFactsImpl: " <> show (length query.userQueryFacts_facts)
+  (qResults, fullScans) <- do
     nextId <- firstFreeId lookup
     -- executeCompiled needs a Define, even though we won't use it
     bracket (FactSet.new nextId) release $ \derived -> do
     let stack = stacked lookup derived
     bracket
-      (compileQueryFacts userQueryFacts_facts)
+      (compileQueryFacts query.userQueryFacts_facts)
       (release . compiledQuerySub) $ \sub -> do
-        results <- executeCompiled schemaInventory Nothing stack sub limits
+        results <- executeCompiled schema.schemaInventory Nothing stack sub limits
         appliedTrans <- either (throwIO . Thrift.BadQuery) return $
           userQueryFactsTransformations trans schemaSelector schema query results
         -- use Pids in result facts to apply a suitable transformation if neded.
@@ -563,9 +563,9 @@ userQueryWrites env odb config bounds lookup repo pred q = do
     if inc
     then IncrementalDerivation <$> sectionsStats
     else return NoExtraSteps
-  Results{..} <- withStats $
+  results <- withStats $
     userQueryImpl env odb config mode bounds lookup repo q
-  return (resStats, resCont, resWriteHandle)
+  return (results.resStats, results.resCont, results.resWriteHandle)
   where
     -- We derive incrementally if
     --   1. the DB is stacked, and
@@ -575,8 +575,8 @@ userQueryWrites env odb config bounds lookup repo pred q = do
     -- stacked DB that we didn't derive on the base DB.
     shouldDeriveIncrementally meta =
       case Thrift.metaDependencies meta of
-        Just (Thrift.Dependencies_stacked Thrift.Stacked{..}) ->
-          check $ Thrift.Repo stacked_name stacked_hash
+        Just (Thrift.Dependencies_stacked stacked) ->
+          check $ Thrift.Repo stacked.stacked_name stacked.stacked_hash
         Just (Thrift.Dependencies_pruned pruned) ->
           check (Thrift.pruned_base pruned)
         Nothing -> return False
@@ -625,8 +625,8 @@ userQueryImpl
   bounds
   lookup
   repo
-  query@Thrift.UserQuery{..} = do
-    let opts = fromMaybe def userQuery_options
+  query = do
+    let opts = fromMaybe def query.userQuery_options
 
     case Thrift.userQueryOptions_syntax opts of
       Thrift.QuerySyntax_ANGLE -> return ()
@@ -652,27 +652,27 @@ userQueryImpl
         -- This is either a new query or the continuation of a query
         -- that returns a temporary predicate.
         _ -> do
-          (compileTime, _, (query@QueryWithInfo{..}, ty, preds)) <-
+          (compileTime, _, (compiledQuery, ty, preds)) <-
             timeIt $ compileAngleQuery
-              (envEnableRecursion env)
+              (env.envEnableRecursion)
               schemaVersion
               schema
               mode
-              userQuery_query
+              query.userQuery_query
               stored
-              (envDebug env)
+              (env.envDebug)
 
           predDiag <- if Thrift.queryDebugOptions_pred_has_facts debug then
               getPredDiags env repo schema preds
               else return []
           let
             irDiag =
-              [ "ir:\n" <> Text.pack (show (displayDefault qiQuery))
+              [ "ir:\n" <> Text.pack (show (displayDefault compiledQuery.qiQuery))
               | Thrift.queryDebugOptions_ir debug ]
 
             cont = case Thrift.userQueryOptions_continuation opts of
               Just c -> Right c
-              Nothing -> Left query
+              Nothing -> Left compiledQuery
           return (ty,compileTime,irDiag <> predDiag,cont)
 
     details <- getReturnPredicateDetails schema returnType
@@ -726,10 +726,10 @@ getPredDiags env repo schema preds = do
         <> Text.unpack " doesn't exist in " ++ show (Thrift.repo_name repo)
 
 getReturnPredicateDetails :: DbSchema -> Type -> IO PredicateDetails
-getReturnPredicateDetails schema@DbSchema{..} returnType = do
+getReturnPredicateDetails schema returnType = do
   case returnType of
     Angle.PredicateTy _ (PidRef pid _) ->
-      case IntMap.lookup (fromIntegral (fromPid pid)) predicatesByPid of
+      case IntMap.lookup (fromIntegral (fromPid pid)) schema.predicatesByPid of
         Nothing -> throwIO $ Thrift.Exception "internal: no predicate"
         Just d -> return d
 
@@ -772,17 +772,17 @@ runQuery
   lookup
   repo
   details
-  CompileInfo{..}
-  Thrift.UserQuery{..} = do
-    vlog 2 $ "return type: " <> show (displayDefault returnType)
+  compileInfo
+  userQuery = do
+    vlog 2 $ "return type: " <> show (displayDefault compileInfo.returnType)
 
     let
-      schema@DbSchema{..} = odbSchema odb
-      opts = fromMaybe def userQuery_options
+      schema = odb.odbSchema
+      opts = fromMaybe def userQuery.userQuery_options
       stored = Thrift.userQueryOptions_store_derived_facts opts
 
     schemaVersion <-
-        schemaVersionForQuery schema config userQuery_schema_id
+        schemaVersionForQuery schema config userQuery.userQuery_schema_id
     trans <- transformationsForQuery schema schemaVersion
 
     unless (Text.null userQuery_predicate) $ do
@@ -791,40 +791,40 @@ runQuery
       -- can be a useful way to catch errors in the client.
       -- If the query is not returning whole facts, then the
       -- client should set this field to "".
-      let ref = SourceRef userQuery_predicate userQuery_predicate_version
+      let ref = SourceRef userQuery.userQuery_predicate userQuery.userQuery_predicate_version
       checkPredicatesMatch schema details ref schemaVersion
 
     expandPids <- optsExpandPids opts schemaVersion schema
     let limits = mkQueryRuntimeOptions opts config expandPids
 
     nextId <- case Thrift.userQueryOptions_continuation opts of
-      Just Thrift.UserQueryCont{..}
-        | userQueryCont_nextId > 0 -> return (Fid userQueryCont_nextId)
+      Just userQueryCont
+        | userQueryCont.userQueryCont_nextId > 0 -> return (Fid userQueryCont.userQueryCont_nextId)
       _otherwise -> firstFreeId lookup
     derived <- FactSet.new nextId
     let stack = stacked lookup derived
 
     defineOwners <- if stored
       then do
-        maybeOwnership <- readTVarIO (odbOwnership odb)
+        maybeOwnership <- readTVarIO (odb.odbOwnership)
         forM maybeOwnership $ \ownership ->
           newDefineOwnership ownership nextId
       else return Nothing
 
     appliedTrans <- either (throwIO . Thrift.BadQuery) return $
-      transformationsFor schema trans returnType
+      transformationsFor schema compileInfo.trans compileInfo.returnType
 
-    ( qResults@QueryResults{..}
+    ( qResults
       , queryDiag
       , bytecodeSize
       , codegenTime
       , fullScans ) <-
-      case cont of
+      case compileInfo.cont of
         Right ucont -> do
-          let binaryCont = Thrift.userQueryCont_continuation ucont
+          let binaryCont = ucont.userQueryCont_continuation
           results <- transformResultsBack appliedTrans <$>
             restartCompiled
-              schemaInventory
+              schema.schemaInventory
               defineOwners
               stack
               (Just $ predicatePid details)
@@ -841,11 +841,11 @@ runQuery
               | Thrift.queryDebugOptions_bytecode debug ]
 
           bracket
-            (timeIt $ compileQuery (envEnableRecursion env) trans bounds query)
+            (timeIt $ compileQuery (env.envEnableRecursion) compileInfo.trans bounds query)
             (\(_, _, sub) -> release $ compiledQuerySub sub)
             $ \(codegenTime, _, sub) -> do
               results <- transformResultsBack appliedTrans <$>
-                executeCompiled schemaInventory defineOwners stack sub limits
+                executeCompiled schema.schemaInventory defineOwners stack sub limits
 
               diags <-
                 evaluate $ force (bytecodeDiag sub) -- don't keep sub alive
@@ -918,13 +918,13 @@ schemaVersionForQuery
   -> ServerConfig.Config
   -> Maybe Thrift.SchemaId  -- ^ SchemaId specified by client
   -> IO SchemaSelector
-schemaVersionForQuery schema ServerConfig.Config{..} qid = do
+schemaVersionForQuery schema config qid = do
   use <-
     case qid of
       Nothing -> return LatestSchema
       Just id
-        | id `Map.member` schemaEnvs schema -> return (SpecificSchemaId id)
-        | config_strict_query_schema_id ->
+        | id `Map.member` (schemaEnvs schema) -> return (SpecificSchemaId id)
+        | config.config_strict_query_schema_id ->
             throwIO (Thrift.UnknownSchemaId id)
         | otherwise -> do
             logWarning $ "schema unavailable: " <> show id
@@ -1022,18 +1022,18 @@ mkQueryRuntimeOptions
   -> Set Pid
   -> QueryRuntimeOptions
 mkQueryRuntimeOptions
-    Thrift.UserQueryOptions{..} ServerConfig.Config{..} expandPids =
+    opts config expandPids =
   QueryRuntimeOptions
-    { queryMaxResults = userQueryOptions_max_results
-        <|> config_default_max_results -- from ServerConfig
-    , queryMaxBytes = userQueryOptions_max_bytes
-        <|> config_default_max_bytes -- from ServerConfig
-    , queryMaxTimeMs = userQueryOptions_max_time_ms
-        <|> config_default_max_time_ms -- from ServerConfig
-    , queryMaxSetSize = config_max_set_size_bytes
-    , queryWantStats = userQueryOptions_collect_facts_searched
+    { queryMaxResults = opts.userQueryOptions_max_results
+        <|> config.config_default_max_results -- from ServerConfig
+    , queryMaxBytes = opts.userQueryOptions_max_bytes
+        <|> config.config_default_max_bytes -- from ServerConfig
+    , queryMaxTimeMs = opts.userQueryOptions_max_time_ms
+        <|> config.config_default_max_time_ms -- from ServerConfig
+    , queryMaxSetSize = config.config_max_set_size_bytes
+    , queryWantStats = opts.userQueryOptions_collect_facts_searched
     , queryDepth = if
-        | userQueryOptions_recursive && not userQueryOptions_omit_results ->
+        | opts.userQueryOptions_recursive && not opts.userQueryOptions_omit_results ->
           ExpandRecursive
         | not (null expandPids) -> ExpandPartial expandPids
         | otherwise -> ResultsOnly
@@ -1176,14 +1176,14 @@ data Stats = Stats
   }
 
 getStats :: DbSchema -> [Pid] -> QueryResults -> IO Stats
-getStats schema fullScans QueryResults{..} = do
+getStats schema fullScans queryResults = do
   let
     results =
-      Vector.length queryResultsFacts
+      Vector.length queryResults.queryResultsFacts
 
     facts =
-      Vector.length queryResultsFacts +
-      Vector.length queryResultsNestedFacts
+      Vector.length queryResults.queryResultsFacts +
+      Vector.length queryResults.queryResultsNestedFacts
 
     pref pid = case lookupPid pid schema of
       Nothing -> error "Unknown Pid in getStats"
@@ -1245,30 +1245,33 @@ mkUserQueryCont contInfo cont nextId =
       Left ps -> map fromPid $ Set.elems ps
 
 checkUserQueryCont :: Thrift.UserQueryCont -> IO ()
-checkUserQueryCont cont@Thrift.UserQueryCont{..} = do
+checkUserQueryCont cont = do
   when
-    (userQueryCont_version < fromIntegral Bytecode.lowestSupportedVersion
-      || userQueryCont_version > fromIntegral Bytecode.version)
+    (cont.userQueryCont_version < fromIntegral Bytecode.lowestSupportedVersion
+      || cont.userQueryCont_version > fromIntegral Bytecode.version)
     $ throwIO $ Thrift.BadQuery $
         "unsupported query continuation version "
-          <> Text.pack (show userQueryCont_version)
+          <> Text.pack (show cont.userQueryCont_version)
   when
-    (userQueryCont_hash /= Thrift.userQueryCont_hash (hashUserQueryCont cont))
+    (cont.userQueryCont_hash /= (hashUserQueryCont cont).userQueryCont_hash)
     $ throwIO $ Thrift.BadQuery "invalid query continuation hash"
 
 hashUserQueryCont :: Thrift.UserQueryCont -> Thrift.UserQueryCont
-hashUserQueryCont Thrift.UserQueryCont{..} = Thrift.UserQueryCont
+hashUserQueryCont cont = Thrift.UserQueryCont
   -- NOTE: The hash is really just a checksum to detect accidental corruption
   -- so a 64 bit non-crypto hash should work fine. Hashable currently uses a
   -- slightly broken (https://github.com/tibbe/hashable/issues/190) version of
   -- FNV-1 but should still be good enough.
   { userQueryCont_hash = fromIntegral $ hash
-      ( userQueryCont_continuation
-      , userQueryCont_nextId
-      , userQueryCont_version
-      , userQueryCont_returnType
+      ( cont.userQueryCont_continuation
+      , cont.userQueryCont_nextId
+      , cont.userQueryCont_version
+      , cont.userQueryCont_returnType
       )
-  , ..
+  , userQueryCont_continuation = cont.userQueryCont_continuation
+  , userQueryCont_nextId = cont.userQueryCont_nextId
+  , userQueryCont_version = cont.userQueryCont_version
+  , userQueryCont_returnType = cont.userQueryCont_returnType
   }
 
 serializeType :: Type -> ByteString

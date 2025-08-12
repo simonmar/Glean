@@ -112,14 +112,14 @@ glean.db.write.rejected.avg.60
 
 -- | Create threads to process the write queues
 writerThread :: Env -> WriteQueues -> IO ()
-writerThread env WriteQueues{..} = mask $ \restore ->
+writerThread env writeQueues = mask $ \restore ->
   forever $ handler restore $
     void $ tryBracket
       dequeue
       done
       execute
  where
-  done (Just (WriteJob{..}, repo, WriteQueue{..})) result = do
+  done (Just (WriteJob writeSize _writeContentIO writeDone writeStart, repo, queue)) result = do
     latency <- do
       writeEnd <- getTime Monotonic
       return (writeEnd - pointStart writeStart)
@@ -128,11 +128,11 @@ writerThread env WriteQueues{..} = mask $ \restore ->
     else
       addStatValueType "glean.db.write.succeeded" (writeSize `div` k) Sum
     immediately $ do
-      now $ writeTVar writeQueueLatency latency
-      now $ modifyTVar' writeQueueActive (subtract 1)
-      queueCount <- now $ updateTVar writeQueueCount (subtract 1)
-      qSize <- now $ updateTVar writeQueueSize (subtract writeSize)
-      size <- now $ updateTVar writeQueuesSize (subtract writeSize)
+      now $ writeTVar queue.writeQueueLatency latency
+      now $ modifyTVar' queue.writeQueueActive (subtract 1)
+      queueCount <- now $ updateTVar queue.writeQueueCount (subtract 1)
+      qSize <- now $ updateTVar queue.writeQueueSize (subtract writeSize)
+      size <- now $ updateTVar writeQueues.writeQueuesSize (subtract writeSize)
       later $ reportQueueSizes repo queueCount qSize size (Just latency)
     -- don't put the MVar until we have updated writeQueueActive, otherwise
     -- there is a race condition with finish database which will fail because
@@ -160,16 +160,16 @@ writerThread env WriteQueues{..} = mask $ \restore ->
   -- This is an O(n) transaction which could be bad, but in
   -- practice the number of queues with checkpoints will be small.
   dequeueLoop requeueCheckpoints = do
-    (repo, queue@WriteQueue{..}) <- readTQueue writeQueues
-    maybeJob <- tryReadTQueue writeQueue
+    (repo, queue@WriteQueue{writeQueue = writeQueueTQueue, writeQueueActive = writeQueueActive, writeQueueCount = _writeQueueCount, writeQueueSize = _writeQueueSize, writeQueueLatency = _writeQueueLatency}) <- readTQueue writeQueues.writeQueues
+    maybeJob <- tryReadTQueue writeQueueTQueue
     case maybeJob of
       Nothing -> do requeueCheckpoints; return Nothing
       Just job -> do
         let
           requeue = do
             requeueCheckpoints
-            whenM (not <$> isEmptyTQueue writeQueue) $
-              writeTQueue writeQueues (repo, queue)
+            whenM (not <$> isEmptyTQueue writeQueueTQueue) $
+              writeTQueue writeQueues.writeQueues (repo, queue)
         case job of
           WriteJob{} -> do
             requeue
@@ -179,9 +179,9 @@ writerThread env WriteQueues{..} = mask $ \restore ->
             active <- readTVar writeQueueActive
             if active == 0  -- we get to execute the action
               then do requeue; return (Just (job, repo, queue))
-              else do unGetTQueue writeQueue job; dequeueLoop requeue
+              else do unGetTQueue writeQueueTQueue job; dequeueLoop requeue
 
-  execute (Just (WriteJob{..}, repo, _)) = do
+  execute (Just (WriteJob _writeSize writeContentIO _writeDone writeStart, repo, _)) = do
     writeContent <- writeContentIO
     writeDatabase env repo writeContent writeStart
   execute (Just (WriteCheckpoint io, _, _)) = do io; return Subst.empty
@@ -193,13 +193,13 @@ checkMemoryAvailable
   -> ServerConfig.Config
   -> Int -- ^ requested size
   -> STM Bool
-checkMemoryAvailable Env{..} ServerConfig.Config{..} size = do
-  let WriteQueues{..} = envWriteQueues
-  pending <- readTVar writeQueuesSize
+checkMemoryAvailable env config size = do
+  let writeQueuesInstance = env.envWriteQueues
+  pending <- readTVar writeQueuesInstance.writeQueuesSize
   let !newSize = pending + size
-  if roundUp mb newSize <= fromIntegral config_db_write_queue_limit_mb
+  if roundUp mb newSize <= fromIntegral config.config_db_write_queue_limit_mb
     then do
-      writeTVar writeQueuesSize newSize
+      writeTVar writeQueuesInstance.writeQueuesSize newSize
       return True
     else return False
 
@@ -222,11 +222,11 @@ enqueueWrite
   -> Bool
   -> IO WriteContent
   -> IO (MVar (Either SomeException Subst.Subst))
-enqueueWrite env@Env{..} repo size optSchemaId checkQueueSize writeContent = do
+enqueueWrite env repo size optSchemaId checkQueueSize writeContent = do
   start <- beginTick 1
-  config <- Observed.get envServerConfig
+  config <- Observed.get env.envServerConfig
   mvar <- newEmptyMVar
-  withWritableDatabase env repo $ \(queue@WriteQueue{..}, odbSchema) -> do
+  withWritableDatabase env repo $ \(queue, odbSchema) -> do
 
   -- check the schema ID in the batch matches the DB
   case optSchemaId of
@@ -238,22 +238,22 @@ enqueueWrite env@Env{..} repo size optSchemaId checkQueueSize writeContent = do
           (show (Map.keys (schemaEnvs odbSchema)))
     _ -> return ()
 
-  let WriteQueues{..} = envWriteQueues
+  let writeQueuesInstance = env.envWriteQueues
       enqueueIt = do
-        pending <- now $ readTVar writeQueuesSize
+        pending <- now $ readTVar writeQueuesInstance.writeQueuesSize
         let !newSize = pending + size
         now $ do
           addToWriteQueue
             repo
             queue
-            envWriteQueues
+            env.envWriteQueues
             WriteJob
               { writeSize = size
               , writeContentIO = writeContent
               , writeDone = mvar
               , writeStart = start }
-        queueCount <- now $ updateTVar writeQueueCount (+1)
-        queueSize <- now $ updateTVar writeQueueSize (+ size)
+        queueCount <- now $ updateTVar queue.writeQueueCount (+1)
+        queueSize <- now $ updateTVar queue.writeQueueSize (+ size)
         later $ do
           addStatValueType "glean.db.write.enqueued" (size `div` k) Sum
           reportQueueSizes repo queueCount queueSize newSize Nothing
@@ -262,7 +262,7 @@ enqueueWrite env@Env{..} repo size optSchemaId checkQueueSize writeContent = do
       then now $ checkMemoryAvailable env config size
       else return True
     if check then enqueueIt else do
-      latency <- now $ readTVar writeQueueLatency
+      latency <- now $ readTVar queue.writeQueueLatency
       let elapsed = fromIntegral (toNanoSecs latency) / 1000000000.0
       later $ rejectWrite repo size elapsed
   return mvar
@@ -276,7 +276,7 @@ enqueueCheckpoint
   -> IO ()
 enqueueCheckpoint env repo io = withWritableDatabase env repo $ \(queue, _) ->
   atomically $ void $
-    addToWriteQueue repo queue (envWriteQueues env) (WriteCheckpoint io)
+    addToWriteQueue repo queue (env.envWriteQueues) (WriteCheckpoint io)
 
 addToWriteQueue
   :: Repo
@@ -284,11 +284,11 @@ addToWriteQueue
   -> WriteQueues
   -> WriteJob
   -> STM ()
-addToWriteQueue repo queue@WriteQueue{..} WriteQueues{..} job = do
-  wasEmpty <- isEmptyTQueue writeQueue
-  writeTQueue writeQueue job
+addToWriteQueue repo queue writeQueuesInstance job = do
+  wasEmpty <- isEmptyTQueue queue.writeQueue
+  writeTQueue queue.writeQueue job
   -- if this repo previously had no writes, add it to the round-robin
-  when wasEmpty $ writeTQueue writeQueues (repo, queue)
+  when wasEmpty $ writeTQueue writeQueuesInstance.writeQueues (repo, queue)
 
 reportQueueSizes :: Repo -> Int -> Int -> Int -> Maybe TimeSpec -> IO ()
 reportQueueSizes repo repoQueueCount repoQueueSize totalQueueSize mLatency = do
@@ -304,19 +304,19 @@ reportQueueSizes repo repoQueueCount repoQueueSize totalQueueSize mLatency = do
         elapsedMilliSeconds Avg
 
 enqueueBatch :: Env -> ComputedBatch -> Maybe DefineOwnership -> IO SendResponse
-enqueueBatch env ComputedBatch{..} ownership = do
-  let size = ByteString.length (batch_facts computedBatch_batch)
-  traceMsg (envTracer env)
-    (GleanTraceEnqueue computedBatch_repo EnqueueBatch size) $ do
+enqueueBatch env computedBatch ownership = do
+  let size = ByteString.length (batch_facts computedBatch.computedBatch_batch)
+  traceMsg (env.envTracer)
+    (GleanTraceEnqueue computedBatch.computedBatch_repo EnqueueBatch size) $ do
   -- NOTE: we use UUIDs here rather than, say, consecutive
   -- numbers because we want to avoid conflicts when the
   -- server restarts/crashes
   handle <- UUID.toText <$> UUID.nextRandom
 
-  let size = batchSize computedBatch_batch
-      optSchemaId = batch_schema_id computedBatch_batch
-  r <- try $ enqueueWrite env computedBatch_repo size optSchemaId True $ pure $
-        (writeContentFromBatch computedBatch_batch) {
+  let size = batchSize computedBatch.computedBatch_batch
+      optSchemaId = batch_schema_id computedBatch.computedBatch_batch
+  r <- try $ enqueueWrite env computedBatch.computedBatch_repo size optSchemaId True $ pure $
+        (writeContentFromBatch computedBatch.computedBatch_batch) {
           writeOwnership= ownership
         }
   case r of
@@ -324,14 +324,14 @@ enqueueBatch env ComputedBatch{..} ownership = do
     Left (Retry n) ->
       return $ Thrift.SendResponse_retry (BatchRetry n)
     Right write -> do
-     when computedBatch_remember $ rememberWrite env handle write
+     when computedBatch.computedBatch_remember $ rememberWrite env handle write
      return $ Thrift.SendResponse_handle handle
 
 batchSize :: Thrift.Batch -> Int
-batchSize Thrift.Batch{..} =
-  ByteString.length batch_facts +
-  batchOwnedSize batch_owned +
-  batchDependenciesSize batch_dependencies
+batchSize batch =
+  ByteString.length batch.batch_facts +
+  batchOwnedSize batch.batch_owned +
+  batchDependenciesSize batch.batch_dependencies
 
 batchOwnedSize :: HashMap UnitName ListOfIds -> Int
 batchOwnedSize = Monoid.getSum . foldMap (Monoid.Sum . storableSize)
@@ -355,11 +355,11 @@ enqueueJsonBatch
   -> IO Thrift.SendJsonBatchResponse
 enqueueJsonBatch env repo batch = do
   let
-    jsonFactBatchSize JsonFactBatch{..} =
-      sum (map ByteString.length jsonFactBatch_facts) +
-      maybe 0 ByteString.length jsonFactBatch_unit
+    jsonFactBatchSize jsonFactBatch =
+      sum (map ByteString.length jsonFactBatch.jsonFactBatch_facts) +
+      maybe 0 ByteString.length jsonFactBatch.jsonFactBatch_unit
     size = sum (map jsonFactBatchSize (sendJsonBatch_batches batch))
-  traceMsg (envTracer env) (GleanTraceEnqueue repo EnqueueJsonBatch size) $ do
+  traceMsg (env.envTracer) (GleanTraceEnqueue repo EnqueueJsonBatch size) $ do
   handle <- UUID.toText <$> UUID.nextRandom
   let optSchemaId =
         sendJsonBatch_options batch >>= sendJsonBatchOptions_schema_id
@@ -375,7 +375,7 @@ enqueueBatchDescriptor
   -> EnqueueBatchWaitPolicy
   -> IO Thrift.EnqueueBatchResponse
 enqueueBatchDescriptor env repo enqueueBatch waitPolicy = do
-  traceMsg (envTracer env)
+  traceMsg (env.envTracer)
     (GleanTraceEnqueue repo EnqueueBatchDescriptor 0) $ do
   handle <- UUID.toText <$> UUID.nextRandom
   descriptor <- case enqueueBatch of
@@ -388,8 +388,8 @@ enqueueBatchDescriptor env repo enqueueBatch waitPolicy = do
   return $ def { enqueueBatchResponse_handle = handle }
 
 pollBatch :: Env -> Handle -> IO FinishResponse
-pollBatch env@Env{..} handle = do
-  r <- HashMap.lookup handle <$> readTVarIO envWrites
+pollBatch env handle = do
+  r <- HashMap.lookup handle <$> readTVarIO env.envWrites
   case r of
     Just write -> do
       -- for tiny writes that will complete in a few ms, we would like
@@ -399,19 +399,19 @@ pollBatch env@Env{..} handle = do
       s <- timeout 100000 $ readMVar (writeWait write)
       case s of
         Just x -> do
-          atomically $ void $ updateTVar envWrites $ HashMap.delete handle
+          atomically $ void $ updateTVar env.envWrites $ HashMap.delete handle
           case x of
             Right subst ->
               return $ Thrift.FinishResponse_subst $ Subst.serialize subst
             Left exc -> case fromException exc of
-              Just Retry{..} -> return $ Thrift.FinishResponse_retry $
-                Thrift.BatchRetry retry_seconds
+              Just (retry :: Retry) -> return $ Thrift.FinishResponse_retry $
+                Thrift.BatchRetry retry.retry_seconds
               Nothing -> throwIO exc
         Nothing -> do
           timeout <- getWriteTimeout env
           atomically
             $ void
-            $ updateTVar envWrites
+            $ updateTVar env.envWrites
             $ HashMap.adjust
                 (\w -> w { writeTimeout = timeout })
                 handle
@@ -423,37 +423,37 @@ rememberWrite
   -> Thrift.Handle
   -> MVar (Either SomeException Subst.Subst)
   -> IO ()
-rememberWrite env@Env{..} handle write = do
+rememberWrite env handle write = do
   timeout <- getWriteTimeout env
   atomically
-    $ modifyTVar' envWrites
+    $ modifyTVar' env.envWrites
     $ HashMap.insert handle Write
         { writeWait = write
         , writeTimeout = timeout
         }
 
 getWriteTimeout :: Env -> IO TimePoint
-getWriteTimeout Env{..} = do
-  ServerConfig.Config{..} <- Observed.get envServerConfig
+getWriteTimeout env = do
+  config <- Observed.get env.envServerConfig
   now <- getTimePoint
-  return $ addToTimePoint now $ seconds $ fromIntegral config_db_writes_keep
+  return $ addToTimePoint now $ seconds $ fromIntegral config.config_db_writes_keep
 
 -- | Periodically remove write handles that have timed out. NB: The writes
 -- themselves will still be executed but the substitutions they produce can
 -- no longer be queried.
 reapWrites :: Env -> TVar (HashMap Text Write) -> IO ()
-reapWrites Env{..} writes = forever $ do
-  ServerConfig.Config{..} <- Observed.get envServerConfig
-  threadDelay $ fromIntegral config_db_writes_reap * 1000000
+reapWrites env writes = forever $ do
+  config <- Observed.get env.envServerConfig
+  threadDelay $ fromIntegral config.config_db_writes_reap * 1000000
   now <- getTimePoint
   atomically $ modifyTVar' writes $ HashMap.filter $ \x -> writeTimeout x > now
 
 deleteWriteQueues :: Env -> OpenDB s -> STM ()
-deleteWriteQueues env OpenDB{odbWriting = Just Writing{..}} = do
-  let !WriteQueue{..} = wrQueue
-  size <- readTVar writeQueueSize
-  modifyTVar' (writeQueuesSize (envWriteQueues env)) (subtract size)
-  void $ flushTQueue writeQueue
+deleteWriteQueues env (OpenDB{odbWriting = Just writing}) = do
+  let queue = writing.wrQueue
+  size <- readTVar queue.writeQueueSize
+  modifyTVar' (env.envWriteQueues.writeQueuesSize) (subtract size)
+  void $ flushTQueue queue.writeQueue
   -- This WriteQueue might still be on the writeQueues, but it will
   -- get removed by the next write thread to encounter it.
 deleteWriteQueues _ _ = return ()
@@ -462,12 +462,12 @@ downloadBatchFromLocation
   :: Env
   -> Thrift.BatchDescriptor
   -> IO Thrift.Batch
-downloadBatchFromLocation Env{..} batchDescriptor =
+downloadBatchFromLocation env batchDescriptor =
   let
     batchFormat = batchDescriptor_format batchDescriptor
     locationString = batchDescriptor_location batchDescriptor
   in
-    BatchLocation.fromString envBatchLocationParser locationString batchFormat
+    BatchLocation.fromString env.envBatchLocationParser locationString batchFormat
 
 
 k :: Int

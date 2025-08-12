@@ -297,6 +297,6 @@ type F a = StateT FlattenState (Except Text) a
 instance Fresh (StateT FlattenState (Except Text)) where
   peek = gets flNextVar
   alloc = do
-    state@FlattenState{..} <- get
-    put state { flNextVar = flNextVar + 1 }
-    return flNextVar
+    state <- get
+    put state { flNextVar = state.flNextVar + 1 }
+    return state.flNextVar

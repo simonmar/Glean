@@ -133,15 +133,15 @@ get all the way through the list, give up.
 
 
 reorder :: Schema.DbSchema -> FlattenedQuery -> Except Text CodegenQuery
-reorder dbSchema QueryWithInfo{..} =
+reorder dbSchema queryWithInfo =
   withExcept (\(e, _) -> Text.pack $ show $
-    vcat [pretty e, nest 2 $ vcat [ "in:", displayDefault qiQuery]]) qi
+    vcat [pretty e, nest 2 $ vcat [ "in:", displayDefault (qiQuery queryWithInfo)]]) qi
   where
     qi = do
-      ((q,gen), ReorderState{..}) <-
-        flip runStateT (initialReorderState qiNumVars dbSchema) $ do
-          go qiQuery
-      return (QueryWithInfo q roNextVar gen qiReturnType)
+      ((q,gen), reorderState) <-
+        flip runStateT (initialReorderState (qiNumVars queryWithInfo) dbSchema) $ do
+          go (qiQuery queryWithInfo)
+      return (QueryWithInfo q (roNextVar reorderState) gen (qiReturnType queryWithInfo))
 
     -- 1. replace all wildcards with fresh variables
     -- 2. reorder the statements
@@ -149,10 +149,10 @@ reorder dbSchema QueryWithInfo{..} =
     --    renumber variables (this leads to more efficient/smaller code)
     go query0 = do
       query <- reorderQuery query0
-      let used = varsUsed query <> foldMap vars qiGenerator
+      let used = varsUsed query <> foldMap vars (qiGenerator queryWithInfo)
           varMap = IntMap.fromList (zip (IntSet.toList used) [0..])
       modify $ \s -> s { roNextVar = IntSet.size used }
-      return (reWildQuery varMap query, reWildGenerator varMap <$> qiGenerator)
+      return (reWildQuery varMap query, reWildGenerator varMap <$> qiGenerator queryWithInfo)
 
 reorderQuery :: FlatQuery -> R CgQuery
 reorderQuery (FlatQuery pat _ stmts) =
@@ -1024,9 +1024,9 @@ type R a = StateT ReorderState (Except (Text, Maybe FixBindOrderError)) a
 instance Monad m => Fresh (StateT ReorderState m) where
   peek = gets roNextVar
   alloc = do
-    state@ReorderState{..} <- get
-    put state{ roNextVar = roNextVar + 1 }
-    return roNextVar
+    state <- get
+    put state{ roNextVar = roNextVar state + 1 }
+    return (roNextVar state)
 
 initialReorderState :: Int -> Schema.DbSchema -> ReorderState
 initialReorderState nextVar dbSchema = ReorderState

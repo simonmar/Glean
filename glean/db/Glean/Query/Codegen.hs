@@ -219,7 +219,7 @@ compileQuery r qtrans bounds (QueryWithInfo query numVars lookup ty) = do
     | otherwise ->
         throwIO $ BadQuery "unsupported query"
 
-  (Meta{..}, sub) <- generateQueryCode $ \ regs@QueryRegs{..} -> do
+  (meta, sub) <- generateQueryCode $ \ regs -> do
 
     let outputVars = IntSet.toList $ findOutputs stmts
     outputUninitialized $ Many (length outputVars) $ \outputRegs -> do
@@ -273,18 +273,18 @@ compileQuery r qtrans bounds (QueryWithInfo query numVars lookup ty) = do
           val <- case resultValReg of
             Nothing -> castRegister <$> constant 0
             Just reg -> return reg
-          result idReg resultKeyReg val len
+          regs.result idReg resultKeyReg val len
           jumpIf0 len continue
-          decrAndJumpIf0 maxResults pause
+          decrAndJumpIf0 regs.maxResults pause
           -- check whether we have exceeded maxBytes. Note that we
           -- will return more than max_bytes, but this way we don't
           -- have to backtrack and regenerate the most recent result
           -- again in the continuation.
-          jumpIfGt len maxBytes pause
-          sub len maxBytes
+          jumpIfGt len regs.maxBytes pause
+          sub len regs.maxBytes
           jump continue
           pause <- label
-          suspend saveState continue -- see Note [pausing/resuming queries]
+          suspend regs.saveState continue -- see Note [pausing/resuming queries]
           continue <- label
           return ()
     ret
@@ -315,7 +315,7 @@ compileQuery r qtrans bounds (QueryWithInfo query numVars lookup ty) = do
         return (Just pid, traverse)
     _other -> throwIO $ ErrorCall "unrecognised query return type"
 
-  return (CompiledQuery sub pid traverse meta_fullScans)
+  return (CompiledQuery sub pid traverse meta.meta_fullScans)
 
 isEmptyTy :: Type -> Bool
 isEmptyTy ty
@@ -441,7 +441,7 @@ compileStatements
   syscalls
   qtrans
   bounds
-  regs@QueryRegs{..}
+  regs
   stmts
   vars
   andThen =
@@ -521,27 +521,27 @@ compileStatements
         | isWordTy ty = do
         local $ \setReg -> do
           let set = castRegister setReg
-          newWordSet set
+          regs.newWordSet set
           compileStatements syscalls qtrans bounds regs stmts vars $
             local $ \reg -> do
               compileTermGen expr vars (Just reg) $
-                insertWordSet set (castRegister reg)
+                regs.insertWordSet set (castRegister reg)
           resetOutput (castRegister (vars!v))
           if isByteTy ty
-            then byteSetToByteArray set (castRegister (vars!v))
-            else wordSetToArray set (castRegister (vars!v))
-          freeWordSet set
+            then regs.byteSetToByteArray set (castRegister (vars!v))
+            else regs.wordSetToArray set (castRegister (vars!v))
+          regs.freeWordSet set
         compile rest
       compile (CgAllStatement (Var _ v _) expr stmts : rest) = do
         local $ \setReg -> do
           let set = castRegister setReg
-          newSet set
+          regs.newSet set
           compileStatements syscalls qtrans bounds regs stmts vars $
             outputUninitialized $ \out -> do
               compileTermGen expr vars (Just out) $
-                insertOutputSet set out
-          setToArray set (castRegister (vars!v))
-          freeSet set
+                regs.insertOutputSet set out
+          regs.setToArray set (castRegister (vars!v))
+          regs.freeSet set
         compile rest
       compile (CgNegation stmts : rest) = mdo
         singleResult (compileStatements syscalls qtrans bounds regs stmts vars)
@@ -639,7 +639,7 @@ compileStatements
               patOutput (preProcessPat vpat') $ \vout vcmp -> do
                 reg <- load fail
                 local $ \pidReg -> mdo
-                  lookupKeyValue reg kout vout pidReg
+                  regs.lookupKeyValue reg kout vout pidReg
                   -- TODO: if this is a trusted fact ID (i.e. not supplied by
                   -- the user) then we could skip this test.
                   expectedReg <- constant (fromIntegral (fromPid expected))
@@ -926,17 +926,17 @@ compileStatements
           | isEmpty val ->
             withTerm vars key $ \out -> do
               getOutputSize out size
-              newDerivedFact rpid out size resultReg
+              regs.newDerivedFact rpid out size resultReg
           | isEmpty key ->
             withTerm vars val $ \out -> do
               getOutputSize out size
-              newDerivedFact rpid out size resultReg
+              regs.newDerivedFact rpid out size resultReg
           | otherwise ->
             output $ \out -> do
               buildTerm out vars key
               getOutputSize out size
               buildTerm out vars val
-              newDerivedFact rpid out size resultReg
+              regs.newDerivedFact rpid out size resultReg
 
         inner
 
@@ -951,9 +951,9 @@ compileStatements
       singleResult :: (forall a. Code a -> Code a) -> Code b -> Code b
       singleResult action continue =
         local $ \seekLevel -> mdo
-          currentSeek seekLevel
+          regs.currentSeek seekLevel
           action $ mdo
-            endSeek seekLevel
+            regs.endSeek seekLevel
             jump success
           jump fail
           success <- label
@@ -988,7 +988,7 @@ compileFactGenerator
   -> Maybe (Register 'Word)
   -> Code a
   -> Code a
-compileFactGenerator mtrans bounds qregs@QueryRegs{..}
+compileFactGenerator mtrans bounds qregs
     vars pid kpat vpat section maybeReg inner = mdo
   let etrans = maybe (Left pid) Right mtrans
   withPatterns qregs etrans vars kpat vpat $
@@ -1005,7 +1005,7 @@ compileFactGenerator mtrans bounds qregs@QueryRegs{..}
   local $ \clause keyend clauseend -> mdo
       let need_value = isJust matchValue
       local $ \ignore ok -> do
-        next
+        qregs.next
           seekTok
           need_value
           ok
@@ -1018,7 +1018,7 @@ compileFactGenerator mtrans bounds qregs@QueryRegs{..}
           [ end  -- 0 -> no match
           , continue  -- 1 -> match
           ]
-      suspend saveState loop -- 2 -> timeout / interrupted
+      suspend qregs.saveState loop -- 2 -> timeout / interrupted
       continue <- label
       return ()
 
@@ -1035,12 +1035,12 @@ compileFactGenerator mtrans bounds qregs@QueryRegs{..}
   unless isPointQuery $ jump loop
 
   end <- label
-  endSeek seekTok
+  qregs.endSeek seekTok
   return a
   where
     seek' typ ptr end tok =
       case (section, bounds) of
-        (SeekOnAllFacts, _) -> seek typ ptr end tok
+        (SeekOnAllFacts, _) -> qregs.seek typ ptr end tok
         (SeekOnBase, StackedBoundaries (SectionBoundaries from to) _) ->
           seekBetween from to
         (SeekOnStacked, StackedBoundaries _ (SectionBoundaries from to)) ->
@@ -1050,7 +1050,7 @@ compileFactGenerator mtrans bounds qregs@QueryRegs{..}
         seekBetween from to = do
           pfrom <- constant $ fromIntegral $ fromFid from
           pto <- constant $ fromIntegral $ fromFid to
-          seekWithinSection typ ptr end pfrom pto tok
+          qregs.seekWithinSection typ ptr end pfrom pto tok
 
 
 -- ^ Extract a prefix to be searched and create code to match on the key and
@@ -1089,11 +1089,11 @@ withPatterns syscalls etrans vars kpat vpat act = mdo
   return a
   where
     (pid, transKeyPat, transValPat) = case etrans of
-      Right PredicateTransformation{..} ->
-        let PidRef pid _ = tAvailable in
+      Right predTrans ->
+        let PidRef pid _ = predTrans.tAvailable in
         ( pid
-        , fromMaybe noTrans (transformKeyPattern <*> Just syscalls)
-        , fromMaybe noTrans (transformValuePattern <*> Just syscalls)
+        , fromMaybe noTrans (transformKeyPattern predTrans <*> Just syscalls)
+        , fromMaybe noTrans (transformValuePattern predTrans <*> Just syscalls)
         )
       Left pid ->
         ( pid
@@ -1419,17 +1419,17 @@ recursive
   -> (forall a. Code a -> Code a)  -- ^ code to evaluate repeatedly
   -> Code b                        -- ^ code to insert after
   -> Code b
-recursive QueryRegs{..} before after andThen =
+recursive qregs before after andThen =
   local $ \innerRet startId deltaId -> mdo
 
-  firstFreeId startId
+  qregs.firstFreeId startId
   siteBefore <- before $ mdo
     site <- callSite
     loadLabel ret_ innerRet
     jump doInner
     ret_ <- label
     return site
-  firstFreeId deltaId
+  qregs.firstFreeId deltaId
 
   -- skip to end if there were no new facts produced
   local $ \difference -> mdo
@@ -1445,7 +1445,7 @@ recursive QueryRegs{..} before after andThen =
     jump doInner
     ret_ <- label
     return site
-  firstFreeId deltaId
+  qregs.firstFreeId deltaId
 
   -- execute 'after' again if there are new facts
   local $ \difference -> mdo
@@ -1588,22 +1588,22 @@ compileQueryFacts :: [FactQuery] -> IO CompiledQuery
 compileQueryFacts facts = do
   input <- withBuilder $ \builder -> do
     buildRtsValue builder
-      [ (fromIntegral factQuery_id :: Word64,
-          if factQuery_recursive then 1 else 0 :: Word64)
-      | FactQuery{..} <- facts ]
+      [ (fromIntegral factQuery.factQuery_id :: Word64,
+          if factQuery.factQuery_recursive then 1 else 0 :: Word64)
+      | factQuery <- facts ]
     finishBuilder builder
-  (Meta{..}, sub) <- generateQueryCode $ \ QueryRegs{..} ->
+  (meta, sub) <- generateQueryCode $ \ qregs ->
     outputUninitialized $ \kout vout -> local $ \fid pid rec_ ptr end -> do
       loadLiteral input ptr end
       local $ inputNat ptr end -- ignore the size
       loop <- label
       inputNat ptr end fid
       inputNat ptr end rec_
-      lookupKeyValue fid kout vout pid
-      resultWithPid fid kout vout pid rec_
+      qregs.lookupKeyValue fid kout vout pid
+      qregs.resultWithPid fid kout vout pid rec_
       jumpIfLt ptr end loop
       ret
-  return (CompiledQuery sub Nothing Nothing meta_fullScans)
+  return (CompiledQuery sub Nothing Nothing meta.meta_fullScans)
 
 -- -----------------------------------------------------------------------------
 -- The FFI layer for query bytecode subroutines
@@ -1694,4 +1694,27 @@ generateQueryCode f = generate Optimised $
       callFun_1_0 freeWordSet_ setToken
 
   in
-    f QueryRegs{..}
+    f QueryRegs
+      { seek = seek
+      , seekWithinSection = seekWithinSection
+      , currentSeek = currentSeek
+      , endSeek = endSeek
+      , next = next
+      , lookupKeyValue = lookupKeyValue
+      , result = result
+      , resultWithPid = resultWithPid
+      , newDerivedFact = newDerivedFact
+      , firstFreeId = firstFreeId
+      , newSet = newSet
+      , insertOutputSet = insertOutputSet
+      , setToArray = setToArray
+      , freeSet = freeSet
+      , newWordSet = newWordSet
+      , insertWordSet = insertWordSet
+      , wordSetToArray = wordSetToArray
+      , byteSetToByteArray = byteSetToByteArray
+      , freeWordSet = freeWordSet
+      , saveState = saveState
+      , maxResults = maxResults
+      , maxBytes = maxBytes
+      }

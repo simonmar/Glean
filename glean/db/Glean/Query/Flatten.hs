@@ -52,23 +52,23 @@ flatten
   -> Bool -- ^ derive DerivedAndStored predicates
   -> TypecheckedQuery
   -> Except Text FlattenedQuery
-flatten rec dbSchema ver deriveStored QueryWithInfo{..} =
+flatten rec dbSchema ver deriveStored queryWithInfo =
   fmap fst $ flip runStateT state $ do
     (flattened, maybeLookup, returnType) <- do
-      flat <- flattenQuery qiQuery `catchError` flattenFailure
-      captureKey ver dbSchema flat (case qiQuery of TcQuery ty _ _ _ _ -> ty)
+      flat <- flattenQuery (qiQuery queryWithInfo) `catchError` flattenFailure
+      captureKey ver dbSchema flat (case qiQuery queryWithInfo of TcQuery ty _ _ _ _ -> ty)
     nextVar <- gets flNextVar
     return $ QueryWithInfo flattened nextVar maybeLookup returnType
   where
-      state = initialFlattenState rec dbSchema qiNumVars deriveStoredPred
+      state = initialFlattenState rec dbSchema (qiNumVars queryWithInfo) deriveStoredPred
 
       deriveStoredPred =
-        case derefType qiReturnType of
+        case derefType (qiReturnType queryWithInfo) of
           Angle.PredicateTy _ (PidRef _ pref) | deriveStored -> Just pref
           _ -> Nothing
 
       flattenFailure e = throwError $
-        e <> " in\n" <> Text.pack (show (displayVerbose qiQuery))
+        e <> " in\n" <> Text.pack (show (displayVerbose (qiQuery queryWithInfo)))
 
 flattenQuery :: TcQuery -> F FlatQuery
 flattenQuery query = do
@@ -273,17 +273,17 @@ flattenFactGen pidRef@(PidRef pid _) rng kpat vpat = do
   case lookupPid pid dbSchema of
     Nothing -> lift $ throwError $
       "internal error: flatten: " <> Text.pack (show pid)
-    Just details@PredicateDetails{..} -> do
+    Just details -> do
       let factGen = (mempty, FactGenerator pidRef kpat vpat rng)
-      case predicateDeriving of
+      case predicateDeriving details of
         Schema.NoDeriving ->
           return factGen
         Schema.Derive when query
           | Schema.DerivedAndStored <- when
-          , Just predicateId /= deriveStored ->
+          , Just (predicateId details) /= deriveStored ->
                return factGen
           | otherwise -> do
-            calling predicateId factGen $ do
+            calling (predicateId details) factGen $ do
               query' <- expandDerivedPredicateCall details kpat vpat query
               (group, key, maybeVal) <- flattenQuery' query'
               let val = fromMaybe (Tuple []) maybeVal
@@ -348,10 +348,10 @@ flattenPattern pat = case pat of
     ref@(PidRef _ pred)  <- case ty of
       Angle.PredicateTy _ ref -> return ref
       _other -> throwError "TcDeref: not a predicate"
-    PredicateDetails{..} <- getPredicateDetails pred
+    predicateDetails <- getPredicateDetails pred
     forM r $ \(stmts, p) -> do
       v <- Ref . MatchVar <$> fresh keyTy
-      let valPat = Ref (MatchWild predicateValueType)
+      let valPat = Ref (MatchWild (predicateValueType predicateDetails))
           gen = FactGenerator ref v valPat SeekOnAllFacts
       return (stmts `thenStmt` FlatStatement ty p gen, v)
 
@@ -662,13 +662,13 @@ captureKey ver dbSchema
     captureStmt _ _ _ other =
         (other :| [], Nothing)
 
-  PredicateDetails{..} <- case lookupPid pid dbSchema of
+  predicateDetails <- case lookupPid pid dbSchema of
     Nothing -> throwError "internal: captureKey"
     Just details -> return details
-  keyVar <- fresh predicateKeyType
-  maybeValVar <- if eqType ver predicateValueType unit
+  keyVar <- fresh (predicateKeyType predicateDetails)
+  maybeValVar <- if eqType ver (predicateValueType predicateDetails) unit
     then return Nothing
-    else Just <$> fresh predicateValueType
+    else Just <$> fresh (predicateValueType predicateDetails)
   let
     (ord', capturedOrd) =
       case pat of
@@ -686,7 +686,7 @@ captureKey ver dbSchema
           (conc ords, capturedOrd)
         _other -> (ord, [])
 
-    returnTy = tupleSchema [ty, predicateKeyType, predicateValueType]
+    returnTy = tupleSchema [ty, predicateKeyType predicateDetails, predicateValueType predicateDetails]
 
   case catMaybes capturedOrd of
     [(key, val)] ->
@@ -700,7 +700,7 @@ captureKey ver dbSchema
       let
         gen = FactGenerator pidRef
           (Ref (MatchBind keyVar))
-          (Ref (maybe (MatchWild predicateValueType) MatchBind maybeValVar))
+          (Ref (maybe (MatchWild (predicateValueType predicateDetails)) MatchBind maybeValVar))
           SeekOnAllFacts
       return (FlatQuery pat Nothing (mkStatementGroup ord),
         Just gen,

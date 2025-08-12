@@ -28,9 +28,9 @@ expandDerivedPredicateCall
   -> Pat                -- ^ value pattern, if applicable
   -> TypecheckedQuery   -- ^ query from the derived predicate
   -> F TcQuery
-expandDerivedPredicateCall PredicateDetails{..} key val QueryWithInfo{..} = do
+expandDerivedPredicateCall predicateDetails key val queryWithInfo = do
   (TcQuery _ keyDef maybeValDef stmts ord) <-
-    instantiateWithFreshVariables qiQuery qiNumVars
+    instantiateWithFreshVariables (qiQuery queryWithInfo) (qiNumVars queryWithInfo)
 
   let
     key' = fmap (first (\_ -> error "MatchExt")) key
@@ -52,23 +52,23 @@ expandDerivedPredicateCall PredicateDetails{..} key val QueryWithInfo{..} = do
 
   case maybeValDef of
     Just valDef -> do
-      x <- fresh predicateKeyType
-      y <- fresh predicateValueType
+      x <- fresh (predicateKeyType predicateDetails)
+      y <- fresh (predicateValueType predicateDetails)
       return $
-        TcQuery predicateKeyType (Ref (MatchVar x)) (Just (Ref (MatchVar y)))
+        TcQuery (predicateKeyType predicateDetails) (Ref (MatchVar x)) (Just (Ref (MatchVar y)))
           (stmts ++ [
-            TcStatement predicateKeyType (Ref (MatchBind x)) keyDef,
-            TcStatement predicateKeyType (Ref (MatchVar x)) key',
-            TcStatement predicateValueType (Ref (MatchBind y)) valDef,
-            TcStatement predicateValueType (Ref (MatchVar y)) val' ])
+            TcStatement (predicateKeyType predicateDetails) (Ref (MatchBind x)) keyDef,
+            TcStatement (predicateKeyType predicateDetails) (Ref (MatchVar x)) key',
+            TcStatement (predicateValueType predicateDetails) (Ref (MatchBind y)) valDef,
+            TcStatement (predicateValueType predicateDetails) (Ref (MatchVar y)) val' ])
           ord
     Nothing -> do
-      x <- fresh predicateKeyType
+      x <- fresh (predicateKeyType predicateDetails)
       return $
-        TcQuery predicateKeyType (Ref (MatchVar x)) Nothing
+        TcQuery (predicateKeyType predicateDetails) (Ref (MatchVar x)) Nothing
           (stmts ++ [
-            TcStatement predicateKeyType (Ref (MatchBind x)) keyDef,
-            TcStatement predicateKeyType (Ref (MatchVar x)) key' ])
+            TcStatement (predicateKeyType predicateDetails) (Ref (MatchBind x)) keyDef,
+            TcStatement (predicateKeyType predicateDetails) (Ref (MatchVar x)) key' ])
           ord
 
 -- | Make a fresh instance of a query where none of the variables

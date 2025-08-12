@@ -52,8 +52,8 @@ pruneDerivations hasStoredFacts details =
     pruned = pruneQueries hasStoredFacts derivations
 
     derivations :: HashMap PredicateId TypecheckedQuery
-    derivations = flip HashMap.mapMaybe details $ \PredicateDetails{..} ->
-      case predicateDeriving of
+    derivations = flip HashMap.mapMaybe details $ \predDetails ->
+      case predDetails.predicateDeriving of
         NoDeriving -> Nothing
         Derive _ query -> Just query
 

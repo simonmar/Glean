@@ -261,45 +261,48 @@ withActiveDatabase
   -> Repo
   -> (forall s . Storage s => s -> DB s -> IO a)
   -> IO a
-withActiveDatabase env repo act = bracket
-  (atomically $ do
-    r <- HashMap.lookup repo <$> readTVar env.envActive
-    db <- case r of
-      Just db -> return db
-      Nothing -> do
-        exists <- Catalog.exists env.envCatalog [Local] repo
-        when (not exists) $ CallStack.throwSTM $ Thrift.UnknownDatabase repo
-        deleting <- HashMap.member repo <$> readTVar envDeleting
-        -- TODO: different error?
-        when deleting $ CallStack.throwSTM $ Thrift.UnknownDatabase repo
-        db <- newDB repo
-        modifyTVar' env.envActive $ HashMap.insert repo db
-        return db
-    acquireDB db
-    return db)
-  (atomically . releaseDB env.envCatalog env.envActive)
-  (\db -> act env.envStorage db)
+withActiveDatabase env repo act = case env of
+  Env{envActive, envCatalog, envDeleting, envStorage} -> bracket
+    (atomically $ do
+      r <- HashMap.lookup repo <$> readTVar envActive
+      db <- case r of
+        Just db -> return db
+        Nothing -> do
+          exists <- Catalog.exists envCatalog [Local] repo
+          when (not exists) $ CallStack.throwSTM $ Thrift.UnknownDatabase repo
+          deleting <- HashMap.member repo <$> readTVar envDeleting
+          -- TODO: different error?
+          when deleting $ CallStack.throwSTM $ Thrift.UnknownDatabase repo
+          db <- newDB repo
+          modifyTVar' envActive $ HashMap.insert repo db
+          return db
+      acquireDB db
+      return db)
+    (atomically . releaseDB envCatalog envActive)
+    (\db -> act envStorage db)
 
 usingActiveDatabase
   :: Env
   -> Repo
   -> (forall s. Storage s => Maybe (DB s) -> IO a)
   -> IO a
-usingActiveDatabase env repo = bracket
-  (atomically $ do
-    r <- HashMap.lookup repo <$> readTVar env.envActive
-    mapM_ acquireDB r
-    return r)
-  (atomically . mapM_ (releaseDB env.envCatalog env.envActive))
+usingActiveDatabase env repo = case env of
+  Env{envActive, envCatalog} -> bracket
+    (atomically $ do
+      r <- HashMap.lookup repo <$> readTVar envActive
+      mapM_ acquireDB r
+      return r)
+    (atomically . mapM_ (releaseDB envCatalog envActive))
 
 withMaybeActiveDatabase
   :: Env
   -> Repo
   -> (forall s . Storage s => Maybe (DB s) -> STM a)
   -> STM a
-withMaybeActiveDatabase env repo fn = do
-  active <- readTVar env.envActive
-  fn (HashMap.lookup repo active)
+withMaybeActiveDatabase env repo fn = case env of
+  Env{envActive} -> do
+    active <- readTVar envActive
+    fn (HashMap.lookup repo active)
 
 updateLookupCacheStats :: Env -> IO ()
 updateLookupCacheStats env =
@@ -377,26 +380,27 @@ schemaUpdated
        -- ^ Just repo => only update the schema for this repo,
        -- otherwise update all of them.
   -> IO ()
-schemaUpdated env mbRepo = do
-  let
-    just = case mbRepo of
-      Nothing -> HashMap.elems
-      Just repo -> maybeToList . HashMap.lookup repo
-    acquire = atomically $ do
-      active <- just <$> readTVar env.envActive
-      mapM_ acquireDB active
-      return active
-    release = atomically . mapM_ (releaseDB env.envCatalog env.envActive)
+schemaUpdated env mbRepo = case env of
+  Env{envActive, envCatalog, envDbSchemaCache} -> do
+    let
+      just = case mbRepo of
+        Nothing -> HashMap.elems
+        Just repo -> maybeToList . HashMap.lookup repo
+      acquire = atomically $ do
+        active <- just <$> readTVar envActive
+        mapM_ acquireDB active
+        return active
+      release = atomically . mapM_ (releaseDB envCatalog envActive)
 
-  -- Empty the DbSchema cache. We probably have a new SchemaIndex now
-  -- which invalidates all the entries anyway, and also we don't prune
-  -- this cache anywhere else.
-  when (isNothing mbRepo) $ do
-    modifyMVar_ env.envDbSchemaCache $ \_ -> return HashMap.empty
-    -- previously failed DBs might now open successfully
-    atomically $ Catalog.resetFailed env.envCatalog
+    -- Empty the DbSchema cache. We probably have a new SchemaIndex now
+    -- which invalidates all the entries anyway, and also we don't prune
+    -- this cache anywhere else.
+    when (isNothing mbRepo) $ do
+      modifyMVar_ envDbSchemaCache $ \_ -> return HashMap.empty
+      -- previously failed DBs might now open successfully
+      atomically $ Catalog.resetFailed envCatalog
 
-  bracket acquire release $ \active -> do
+    bracket acquire release $ \active -> do
     forM_ active $ \db -> do
       maybeOpenDB <- atomically $ do
         state <- readTVar db.dbState
@@ -428,12 +432,12 @@ schemaUpdated env mbRepo = do
                   Opening -> return ()
                    -- if we are Opening now, this must have happened
                    -- after the transaction above, so it will already
-                   -- pick up the new schema.
+                  -- pick up the new schema.
                   Open odb ->
                     writeTVar db.dbState $ Open odb { odbSchema = schema }
                   Closing -> return ()
                   Closed -> return ()
-  logInfo "done updating schema for open DBs"
+      logInfo "done updating schema for open DBs"
 
 
 setupWriting :: Lookup.CanLookup lookup => Env -> lookup -> IO Writing
@@ -484,12 +488,14 @@ asyncOpenDB
 asyncOpenDB env storage db version mode deps
     on_success on_failure =
   -- Be paranoid about 'spawnMask' itself throwing.
-  handling_failures $ Warden.spawnMask env.envWarden $ \restore ->
-  loggingAction (runLogRepo "open" env db.dbRepo) (const mempty) $
-  bracket_
-    (atomically $ acquireDB db)
-    (atomically $ releaseDB env.envCatalog env.envActive db) $
-  handling_failures $ do
+  case env of
+    Env{envWarden, envCatalog, envActive} ->
+      handling_failures $ Warden.spawnMask envWarden $ \restore ->
+      loggingAction (runLogRepo "open" env db.dbRepo) (const mempty) $
+      bracket_
+        (atomically $ acquireDB db)
+        (atomically $ releaseDB envCatalog envActive db) $
+      handling_failures $ do
     logInfo $ inRepo db.dbRepo "opening"
     bracketOnError
       (Storage.open storage db.dbRepo mode version)
@@ -498,7 +504,7 @@ asyncOpenDB env storage db version mode deps
           odb <- restore $ do
             logInfo $ inRepo db.dbRepo "opened"
             dbSchema <- setupSchema env db.dbRepo handle mode
-            logInfo $ inRepo dbRepo $
+            logInfo $ inRepo (dbRepo db) $
               "schema has " ++ show (schemaSize dbSchema) ++ " predicates"
             writing <- case mode of
               ReadOnly -> return Nothing
@@ -609,10 +615,10 @@ baseSlices env deps stored_units = case deps of
             show (Set.toList units)
           unitIds <- fmap catMaybes $
             forM (Set.toList units) $ \name -> do
-              id <- Storage.getUnitId odbHandle name
+              id <- Storage.getUnitId (odbHandle odb) name
               vlog 2 $ "unit: " <> show name <> " = " <> show id
               return id
-          maybeOwnership <- readTVarIO odbOwnership
+          maybeOwnership <- readTVarIO (odbOwnership odb)
           r <- forM maybeOwnership $ \ownership ->
             Ownership.slice ownership (catMaybes rest) unitIds exclude
           logInfo $ "completed " <> show n <> " slice for " <> showRepo repo

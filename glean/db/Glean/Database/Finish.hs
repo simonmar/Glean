@@ -34,7 +34,7 @@ import Glean.Util.Observed as Observed
 -- Throws an exception if the database is not incomplete
 -- or there are pending writes.
 finishDatabase :: Env -> Repo -> IO Thrift.FinishDatabaseResponse
-finishDatabase env@(Env{envCatalog, envActive, envServerConfig}) repo  = do
+finishDatabase (Env{envCatalog, envActive}) repo  = do
   atomically $ do
     -- Mark the database as finalizing.
     -- This is read and processed in getTodo in Backup.hs, which then
@@ -77,7 +77,7 @@ finishDatabase env@(Env{envCatalog, envActive, envServerConfig}) repo  = do
 -- WARNING! This is for testing only, and should
 -- never be used on a production database.
 unfinishDatabase :: Env -> Repo -> IO ()
-unfinishDatabase env@(Env{envCatalog, envServerConfig}) repo  = do
+unfinishDatabase (Env{envCatalog, envServerConfig}) repo  = do
   backupPolicy <- ServerConfig.config_backup <$> Observed.get envServerConfig
   let isBackupAllowed = repo_name repo `HashSet.member`
         ServerConfig.databaseBackupPolicy_allowed backupPolicy

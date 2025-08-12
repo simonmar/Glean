@@ -134,10 +134,10 @@ Unification of a complete query proceeds as follows:
 -}
 
 optimise :: FlattenedQuery -> Except Text FlattenedQuery
-optimise query@QueryWithInfo{..} = do
+optimise query = do
   let
     state = OptState
-      { optNextVar = qiNumVars
+      { optNextVar = qiNumVars query
       , optSubst = IntMap.empty
       , optGenerators = IntMap.empty
       , optCurrentScope = IntSet.empty
@@ -145,7 +145,7 @@ optimise query@QueryWithInfo{..} = do
       , optSeen = IntMap.empty
       }
   (optimised, state') <- flip runStateT state $
-    optimiseQuery =<< freshWildQuery qiQuery
+    optimiseQuery =<< freshWildQuery (qiQuery query)
     -- unification relies on wildcards being replaced by variables
     --  1. so that when we substitute an expression in multiple places
     --     we can unify the wildcards across the different instantiations.
@@ -525,9 +525,9 @@ data OptState = OptState
 instance Monad m => Fresh (StateT OptState m) where
   peek = gets optNextVar
   alloc = do
-    state@OptState{..} <- get
-    put state{ optNextVar = optNextVar + 1 }
-    return optNextVar
+    state <- get
+    put state{ optNextVar = optNextVar state + 1 }
+    return (optNextVar state)
 
 type U a = StateT OptState (Except Text) a
 

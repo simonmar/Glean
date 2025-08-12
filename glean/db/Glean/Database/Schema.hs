@@ -133,25 +133,26 @@ fromStoredSchema
   -> DbContent
   -> DebugFlags
   -> IO DbSchema
-fromStoredSchema schemaCache info@StoredSchema{..} dbContent debug =
+fromStoredSchema schemaCache info dbContent debug =
   mkDbSchemaFromSource
     schemaCache
     (Just (storedSchemaPids info))
     dbContent
     debug
-    storedSchema_schema
+    info.storedSchema_schema
 
 storedSchemaPids :: StoredSchema -> HashMap PredicateRef Pid
-storedSchemaPids StoredSchema{..} = HashMap.fromList
-  [ (ref, Pid pid) | (pid, ref) <- Map.toList storedSchema_predicateIds ]
+storedSchemaPids storedSchema = HashMap.fromList
+  [ (ref, Pid pid) | (pid, ref) <- Map.toList storedSchema.storedSchema_predicateIds ]
 
 toStoredSchema :: DbSchema -> StoredSchema
-toStoredSchema DbSchema{ schemaSource = (source, ver, sourceId), ..} =
+toStoredSchema dbSchema =
+  let (source, ver, sourceId) = dbSchema.schemaSource in
   StoredSchema
     { storedSchema_schema = renderSchemaSource source
     , storedSchema_predicateIds = Map.fromList $
         [ (fromPid $ predicatePid p, predicateRef p)
-        | p <- HashMap.elems predicatesById
+        | p <- HashMap.elems dbSchema.predicatesById
         , predicateInStoredSchema p
         ]
         -- Note: only the stored predicates. There can be multiple
@@ -168,7 +169,7 @@ newMergedDbSchema
   -> DbContent
   -> DebugFlags
   -> IO DbSchema
-newMergedDbSchema schemaCache storedSchema@StoredSchema{..}
+newMergedDbSchema schemaCache storedSchema
     index dbContent debug = do
   let
     -- If we have an identical schema in the index, then we can use
@@ -183,18 +184,18 @@ newMergedDbSchema schemaCache storedSchema@StoredSchema{..}
     identicalSchemas =
       [ proc
       | proc <- schemaIndexCurrent index : schemaIndexOlder index
-      , let HashedSchema{..} = procSchemaHashed proc
-      , IntMap.toList (fromStoredVersions storedSchema_versions) ==
-          [(fromIntegral hashedSchemaAllVersion, hashedSchemaId)]
+      , let hashedSchema = procSchemaHashed proc
+      , IntMap.toList (fromStoredVersions storedSchema.storedSchema_versions) ==
+          [(fromIntegral hashedSchema.hashedSchemaAllVersion, hashedSchema.hashedSchemaId)]
       ]
 
     processStoredSchema =
-      case processSchema Nothing storedSchema_schema of
+      case processSchema Nothing storedSchema.storedSchema_schema of
         Left msg -> throwIO $ ErrorCall msg
         Right resolved -> return resolved
 
   fromDB <-
-    if Map.null storedSchema_versions
+    if Map.null storedSchema.storedSchema_versions
       then processStoredSchema
       else case identicalSchemas of
         (one : _) -> return one
@@ -239,12 +240,12 @@ newDbSchemaForTesting toList schemaCache index selector dbContent debug = do
 inventory :: [PredicateDetails] -> Inventory
 inventory ps = Inventory.new
   [ Inventory.CompiledPredicate
-      { compiledPid = predicatePid
+      { compiledPid = d.predicatePid
       , compiledRef = predicateRef d
-      , compiledTypecheck = predicateTypecheck
-      , compiledTraversal = predicateTraversal
+      , compiledTypecheck = d.predicateTypecheck
+      , compiledTraversal = d.predicateTraversal
       }
-    | d@PredicateDetails{..} <- ps ]
+    | d <- ps ]
 
 -- |
 -- Make a DbSchema for an existing database, using the predicates
@@ -274,13 +275,13 @@ dbSchemaKey pidMap stored maybeIndex = DbSchemaCacheKey $
   hashBinary
     ( [ (showRef ref, pid) | (ref, Pid pid) <- HashMap.toList pidMap ]
     , versions (procSchemaHashed stored)
-    , flip (maybe []) maybeIndex $ \SchemaIndex{..} ->
+    , flip (maybe []) maybeIndex $ \schemaIndex ->
         map (versions . procSchemaHashed)
-          (schemaIndexCurrent : schemaIndexOlder)
+          (schemaIndex.schemaIndexCurrent : schemaIndex.schemaIndexOlder)
     )
   where
-  versions HashedSchema{..} =
-    (hashedSchemaAllVersion, unSchemaId hashedSchemaId)
+  versions hashedSchema =
+    (hashedSchema.hashedSchemaAllVersion, unSchemaId hashedSchema.hashedSchemaId)
 
 {- |
    Caching DbSchema
@@ -387,7 +388,7 @@ mkDbSchema toList cacheVar knownPids dbContent
   where
   addedSchemas = case index of
     Nothing -> []
-    Just SchemaIndex{..} -> schemaIndexCurrent : schemaIndexOlder
+    Just schemaIndex -> schemaIndex.schemaIndexCurrent : schemaIndex.schemaIndexOlder
 
   buildDbSchema = do
     let
@@ -448,9 +449,9 @@ mkDbSchema toList cacheVar knownPids dbContent
           DeriveIfEmpty -> True
       useOfNegation ref = HashMap.lookup ref usingNegation
 
-    forM_ (tcEnvPredicates tcEnv) $ \d@PredicateDetails{..} ->
-      when (isStored predicateDeriving) $
-        case useOfNegation predicateId of
+    forM_ (tcEnvPredicates tcEnv) $ \d ->
+      when (isStored d.predicateDeriving) $
+        case useOfNegation d.predicateId of
           Nothing -> return ()
           Just use ->
             let feature = case use of
@@ -478,7 +479,7 @@ mkDbSchema toList cacheVar knownPids dbContent
 
         latestSchema = procSchemaHashed $
           case index of
-            Just SchemaIndex{..} -> schemaIndexCurrent
+            Just schemaIndex -> schemaIndex.schemaIndexCurrent
             Nothing -> procStored
 
         dbSchemaId = hashedSchemaId stored
@@ -808,7 +809,7 @@ typecheckSchema
   -> TcEnv
   -> IO TcEnv
 
-typecheckSchema idToPid stored tcOpts HashedSchema{..} tcEnv = do
+typecheckSchema idToPid stored tcOpts hashedSchema tcEnv = do
   let
     -- NOTE: We store Maybe Type rather than filtering out those typedefs
     -- for which rtsType returns Nothing here because we need to be sufficiently
@@ -822,7 +823,7 @@ typecheckSchema idToPid stored tcOpts HashedSchema{..} tcEnv = do
     typedefs :: Lazy.HashMap.HashMap TypeId (Maybe RTS.Type)
     typedefs = Lazy.HashMap.fromList
       [ (id, rtsType (Schema.rmLocType $ typeDefType def))
-      | (id, def) <- HashMap.toList hashedTypes ]
+      | (id, def) <- HashMap.toList hashedSchema.hashedTypes ]
 
     lookupType :: TypeId -> Maybe RTS.Type
     lookupType ref =
@@ -835,7 +836,7 @@ typecheckSchema idToPid stored tcOpts HashedSchema{..} tcEnv = do
   let
     -- If we have already seen this predicate, no need to
     -- typecheck it again.
-    new = HashMap.difference hashedPreds (tcEnvPredicates tcEnv)
+    new = HashMap.difference hashedSchema.hashedPreds (tcEnvPredicates tcEnv)
     new' = HashMap.map rmTypeLocPredDef new
     mkPredicateDetails (id,def) =
         case
@@ -890,12 +891,12 @@ typecheckSchema idToPid stored tcOpts HashedSchema{..} tcEnv = do
   -- Check the invariant that stored predicates do not refer to derived
   -- predicates. We have to defer this check until last, because
   -- derivations may have been attached to existing predicates now.
-  forM_ finalDetails $ \PredicateDetails{..} -> do
+  forM_ finalDetails $ \predicateDetails -> do
     let
       check = do
-        checkStoredType finalPreds types predicateId predicateKeyType
-        checkStoredType finalPreds types predicateId predicateValueType
-    case predicateDeriving of
+        checkStoredType finalPreds types predicateDetails.predicateId predicateDetails.predicateKeyType
+        checkStoredType finalPreds types predicateDetails.predicateId predicateDetails.predicateValueType
+    case predicateDetails.predicateDeriving of
       NoDeriving -> return ()
          -- In principle we should really enforce that predicates without
          -- a derivation don't refer to non-stored derived predicates.
@@ -982,7 +983,7 @@ checkStoredType preds types def ty = go ty
   go (RecordTy fields) = forM_ fields $ \(FieldDef _ ty) -> go ty
   go (SumTy fields) = forM_ fields $ \(FieldDef _ ty) -> go ty
   go (PredicateTy _ (PidRef _ ref)) = case HashMap.lookup ref preds of
-    Just PredicateDetails{..} -> case predicateDeriving of
+    Just predicateDetails -> case predicateDetails.predicateDeriving of
       Derive DerivedAndStored _ -> return ()
       Derive _ _ -> throwIO $ ErrorCall $ show $
          "stored predicate " <> displayDefault def <>
@@ -990,7 +991,7 @@ checkStoredType preds types def ty = go ty
       _ -> return ()
     Nothing -> error $ "checkStoredType: " <> Text.unpack (showRef ref)
   go (NamedTy _ (ExpandedType ref _)) = case HashMap.lookup ref types of
-    Just TypeDetails{..} -> go typeType
+    Just typeDetails -> go typeDetails.typeType
     Nothing -> error $ "checkStoredType: " <> Text.unpack (showRef ref)
   go _ = return ()
 
@@ -1139,7 +1140,7 @@ definitions schemas = (types, preds)
 
 -- | Interrogate the schema associated with a DB
 getSchemaInfo :: DbSchema -> SchemaIndex -> GetSchemaInfo -> IO SchemaInfo
-getSchemaInfo dbSchema index@SchemaIndex{..} GetSchemaInfo{..} = do
+getSchemaInfo dbSchema index getSchemaInfo = do
   let
     pids = Map.fromList $
       [ (fromPid $ predicatePid p, predicateRef p)
@@ -1153,10 +1154,10 @@ getSchemaInfo dbSchema index@SchemaIndex{..} GetSchemaInfo{..} = do
     dbSchemaIds = toStoredVersions sourceVer sourceId
     otherSchemaIds =
       [ toStoredVersions
-          (hashedSchemaAllVersion procSchemaHashed)
-          (hashedSchemaId procSchemaHashed)
-      | ProcessedSchema{..} <- schemaIndexOlder
-      , hashedSchemaId procSchemaHashed /= sourceId
+          (hashedSchemaAllVersion (procSchemaHashed procSchema))
+          (hashedSchemaId (procSchemaHashed procSchema))
+      | procSchema <- index.schemaIndexOlder
+      , hashedSchemaId (procSchemaHashed procSchema) /= sourceId
       ]
 
     fromPredicateId predId =
@@ -1167,9 +1168,9 @@ getSchemaInfo dbSchema index@SchemaIndex{..} GetSchemaInfo{..} = do
       | (p, pp) <- HashMap.toList (derivationDepends dbSchema)
       ]
 
-  source <- if getSchemaInfo_omit_source
+  source <- if getSchemaInfo.getSchemaInfo_omit_source
     then return ""
-    else case getSchemaInfo_select of
+    else case getSchemaInfo.getSchemaInfo_select of
       SelectSchema_stored{} -> return storedSchema
       SelectSchema_current{} ->
         findSchemaSource index dbSchema (schemaId dbSchema)
@@ -1246,11 +1247,11 @@ findSchemaInIndex
   :: Glean.Database.Config.SchemaIndex
   -> Thrift.SchemaId
   -> Maybe ProcessedSchema
-findSchemaInIndex Glean.Database.Config.SchemaIndex{..} sid =
+findSchemaInIndex schemaIndex sid =
   listToMaybe matches
   where
   matches =
     [ proc
-    | proc <- schemaIndexCurrent : schemaIndexOlder
+    | proc <- schemaIndex.schemaIndexCurrent : schemaIndex.schemaIndexOlder
     , sid == hashedSchemaId (procSchemaHashed proc)
     ]

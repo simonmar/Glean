@@ -153,25 +153,25 @@ typecheckDeriving tcEnv opts rtsType predDetails derivingInfo = do
                 in
                 (key, Just (App span val xs))
               _other -> (head, Nothing)
-          key' <- typecheckPattern ContextPat predicateKeyType key
+          key' <- typecheckPattern ContextPat predDetails.predicateKeyType key
           maybeVal' <- case maybeVal of
             Nothing
-              | eqType (tcOptAngleVersion opts) unit predicateValueType ->
+              | eqType (tcOptAngleVersion opts) unit predDetails.predicateValueType ->
                 return Nothing
               | otherwise -> prettyErrorIn head $ nest 4 $ vcat
                 [ "a functional predicate must return a value,"
                 , "i.e. the query should have the form 'X -> Y where .." ]
             Just val -> Just <$>
-              typecheckPattern ContextPat predicateValueType val
+              typecheckPattern ContextPat predDetails.predicateValueType val
           stmts' <- mapM typecheckStatement stmts
           freeVariablesAreErrors
           unboundVariablesAreErrors
           resolvePromote
           zonkVars
-          q <- zonkTcQuery (TcQuery predicateKeyType key' maybeVal' stmts' ord)
+          q <- zonkTcQuery (TcQuery predDetails.predicateKeyType key' maybeVal' stmts' ord)
           nextVar <- gets tcNextVar
           return $ Derive deriveWhen $
-            QueryWithInfo q nextVar Nothing predicateKeyType
+            QueryWithInfo q nextVar Nothing predDetails.predicateKeyType
   return d
 
 needsResult
@@ -337,7 +337,7 @@ inferExpr ctx pat = case pat of
       (varsPat srcElse mempty)
       (\(_,_, thenTy) -> typecheckPattern ctx thenTy srcElse)
 
-    return (Ref (MatchExt (Typed ty (TcIf{..}))), ty)
+    return (Ref (MatchExt (Typed ty (TcIf cond then_ else_))), ty)
 
   ElementsOfArray _ e -> do
     (e', ty) <- inferExpr ContextExpr e
@@ -382,8 +382,8 @@ inferExpr ctx pat = case pat of
     (p', predTy) <- inferExpr ctx p
     ty <- case predTy of
       PredicateTy _ (PidRef _ ref) -> do
-        PredicateDetails{..} <- getPredicateDetails ref
-        return predicateKeyType
+        predDetails <- getPredicateDetails ref
+        return predDetails.predicateKeyType
       _ -> do
         y <- freshTyVarInt
         keyTy <- freshTyVar
@@ -447,13 +447,13 @@ fieldSelect src ty pat fieldName recordOrSum = do
   ty' <- apply ty
   case derefType ty' of
     PredicateTy _ (PidRef _ ref) -> do
-      TcEnv{..} <- gets tcEnv
-      PredicateDetails{..} <- case HashMap.lookup ref tcEnvPredicates of
+      tcEnv <- gets tcEnv
+      predDetails <- case HashMap.lookup ref tcEnv.tcEnvPredicates of
         Nothing -> prettyErrorIn src $ "fieldSelect: " <> displayDefault ref
         Just details -> return details
       let deref = TcDeref ty pat
-      fieldSelect src predicateKeyType
-        (Ref (MatchExt (Typed predicateKeyType deref)))
+      fieldSelect src predDetails.predicateKeyType
+        (Ref (MatchExt (Typed predDetails.predicateKeyType deref)))
         fieldName recordOrSum
     RecordTy fields
       | Record <- recordOrSum -> case lookupField fieldName fields of
@@ -693,20 +693,20 @@ tcFactGenerator
   -> Maybe s
   -> T (TcPat, Type)
 tcFactGenerator ref pat range predSpan = do
-  TcEnv{..} <- gets tcEnv
-  PredicateDetails{..} <- case HashMap.lookup ref tcEnvPredicates of
+  tcEnv <- gets tcEnv
+  predDetails <- case HashMap.lookup ref tcEnv.tcEnvPredicates of
     Nothing -> prettyErrorIn pat $ "tcFactGenerator: " <> displayDefault ref
     Just details -> return details
   (kpat', vpat') <- case pat of
     KeyValue _ kpat vpat -> do
-      kpat' <- typecheckPattern ContextPat predicateKeyType kpat
-      vpat' <- typecheckPattern ContextPat predicateValueType vpat
+      kpat' <- typecheckPattern ContextPat predDetails.predicateKeyType kpat
+      vpat' <- typecheckPattern ContextPat predDetails.predicateValueType vpat
       return (kpat', vpat')
     _other -> do
-      kpat' <- typecheckPattern ContextPat predicateKeyType pat
-      return (kpat', mkWild predicateValueType)
+      kpat' <- typecheckPattern ContextPat predDetails.predicateKeyType pat
+      return (kpat', mkWild predDetails.predicateValueType)
   let
-    pidRef = PidRef predicatePid ref
+    pidRef = PidRef predDetails.predicatePid ref
     ty = PredicateTy () pidRef
 
   case predSpan of
@@ -763,10 +763,10 @@ bindOrUse ContextPat name state =
 inferVar :: IsSrcSpan span => Context -> span -> Name -> T (TcPat, Type)
 inferVar ctx span name = do
   checkVarCase span name
-  state@TypecheckState{..} <- get
-  case HashMap.lookup name tcScope of
+  state <- get
+  case HashMap.lookup name state.tcScope of
     Just v@(Var ty _ _) -> do
-      put $ bindOrUse ctx name $ state { tcFree = HashSet.delete name tcFree }
+      put $ bindOrUse ctx name $ state { tcFree = HashSet.delete name state.tcFree }
       return (Ref (MatchVar v), ty)
     Nothing -> do
       x <- freshTyVar
@@ -776,33 +776,33 @@ inferVar ctx span name = do
 varOcc :: IsSrcSpan span => Context -> span -> Name -> Type -> T TcPat
 varOcc ctx span name ty = do
   checkVarCase span name
-  state@TypecheckState{..} <- get
-  case HashMap.lookup name tcScope of
+  state <- get
+  case HashMap.lookup name state.tcScope of
     Nothing -> do
       let
-        var = Var ty tcNextVar (Just name)
-        !next = tcNextVar + 1
+        var = Var ty state.tcNextVar (Just name)
+        !next = state.tcNextVar + 1
       put $ bindOrUse ctx name $ state
         { tcNextVar = next
-        , tcScope = HashMap.insert name var tcScope
-        , tcFree = HashSet.insert name tcFree
-        , tcVars = IntMap.insert tcNextVar var tcVars
+        , tcScope = HashMap.insert name var state.tcScope
+        , tcFree = HashSet.insert name state.tcFree
+        , tcVars = IntMap.insert state.tcNextVar var state.tcVars
         }
       return (RTS.Ref (MatchBind var))
     Just v@(Var ty' _ _) -> do
       put $ bindOrUse ctx name $
-        state { tcFree = HashSet.delete name tcFree }
+        state { tcFree = HashSet.delete name state.tcFree }
       addErrSpan span $ unify ty ty'
       return (Ref (MatchVar v))
 
 freshVariable :: IsSrcSpan s => s -> T (Pat' s st)
 freshVariable s = do
-  state@TypecheckState{..} <- get
-  let !next = tcNextVar + 1
-      name = "Tmp__" <> showt tcNextVar
+  state <- get
+  let !next = state.tcNextVar + 1
+      name = "Tmp__" <> showt state.tcNextVar
   put state {
     tcNextVar = next,
-    tcVisible = HashSet.insert name tcVisible }
+    tcVisible = HashSet.insert name state.tcVisible }
     -- setting tcVisible here is a bit of a hack, but it should be OK
     -- as long as the fresh variable is used in the current scope and
     -- not a nested scope.
@@ -820,8 +820,8 @@ freeVariablesAreErrors = do
 
 unboundVariablesAreErrors :: T ()
 unboundVariablesAreErrors = do
-  TypecheckState{..} <- get
-  unboundVariablesAreErrors_ tcUses tcBindings
+  state <- get
+  unboundVariablesAreErrors_ state.tcUses state.tcBindings
 
 unboundVariablesAreErrors_ :: VarSet -> VarSet -> T ()
 unboundVariablesAreErrors_ uses binds = do
@@ -1209,8 +1209,8 @@ promoteTo _ (PredicateTy _ (PidRef p _)) (PredicateTy _ (PidRef q _))
     -- if not equal, q must be the key of p, so fall through
     -- (assume we don't have  predicate P : P)
 promoteTo s t u@(PredicateTy _ (PidRef _ ref) ) = do
-  PredicateDetails{..} <- getPredicateDetails ref
-  addErrSpan s $ unify predicateKeyType t
+  predDetails <- getPredicateDetails ref
+  addErrSpan s $ unify predDetails.predicateKeyType t
   return (Ref . MatchExt . Typed u . TcPromote t)
 promoteTo s t u = do
   -- the target type (u) is not a predicate or a tyvar, so it must be
@@ -1231,8 +1231,8 @@ demoteTo s t@(TyVar x) u = do
 demoteTo _ (PredicateTy _ (PidRef p _)) (PredicateTy _ (PidRef q _))
   | p == q = return id
 demoteTo s t@(PredicateTy _ (PidRef _ ref)) u = do
-  PredicateDetails{..} <- getPredicateDetails ref
-  addErrSpan s $ unify predicateKeyType u
+  predDetails <- getPredicateDetails ref
+  addErrSpan s $ unify predDetails.predicateKeyType u
   return (Ref . MatchExt . Typed u . TcDemote t)
 demoteTo s t u = do
   -- the source type (t) is not a predicate or a tyvar, so it must be
@@ -1262,8 +1262,8 @@ resolvePromote = do
           (PredicateTy _ (PidRef _ ref), PredicateTy _ (PidRef _ ref'))
             | ref == ref' -> return Nothing
           (_other, PredicateTy _ (PidRef _ ref)) -> do
-            PredicateDetails{..} <- getPredicateDetails ref
-            addErrSpan span $ unify predicateKeyType from
+            predDetails <- getPredicateDetails ref
+            addErrSpan span $ unify predDetails.predicateKeyType from
             return Nothing
           (_other, TyVar{}) | not defaultTyVars ->
             return (Just (from, to', Some span))
