@@ -416,6 +416,7 @@ getDefinition ::
 getDefinition path lineCol = do
   env <- getGleanLspEnv
   symbols <- findSymbol lineCol <$> getSymbolsCached path
+  logInfo $ "getDefinition: " <> Text.pack (show symbols)
   return $ fmap (LSP.DefinitionLink . locationToLocationLink) $
     refTargets env.wsRoot symbols
 
