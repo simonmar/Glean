@@ -343,3 +343,48 @@ $(BUILD_DIR)/current.sh: force
 .PHONY: install
 install::
 	mkdir -p $(PREFIX)
+
+# -----------------------------------------------------------------------------
+
+DBROOT=--service localhost:25052
+# DBROOT=--db-root DIR --schema SCHEMA
+GLEAN:=$(shell cabal list-bin exe:glean)
+HIE:=$(shell cabal list-bin hie-indexer)
+STACKAGE_SRC=$$HOME/code/stackage
+
+STACKAGE_DB=stackage/4
+GLEAN_DB=glean/4
+
+.PHONY: index-glean
+index-glean::
+
+index-stackage::
+	-$(GLEAN) $(DBROOT) delete --db $(STACKAGE_DB)
+	cd $(STACKAGE_SRC) && \
+		$(GLEAN) $(DBROOT) index haskell-hie \
+		--hie-indexer $(HIE) \
+		--db $(STACKAGE_DB) \
+		dist-newstyle \
+		--src '$$PACKAGE' \
+		--arg=--prefix=stackage \
+		--arg=--unit=id
+
+index-glean::
+	-$(GLEAN) $(DBROOT) delete --db $(GLEAN_DB)
+	$(GLEAN) $(DBROOT) index haskell-hie \
+		--hie-indexer $(HIE) \
+		--db $(GLEAN_DB) \
+		--stacked $(STACKAGE_DB) \
+		dist-newstyle/build/x86_64-linux/ghc-* \
+		--src . \
+		--src hsthrift/common/util \
+		--src hsthrift/common/github \
+		--src hsthrift/common/mangle \
+		--src hsthrift/lib \
+		--src hsthrift/compiler \
+		--src hsthrift/haxl \
+		--src hsthrift/tests \
+		--src hsthrift/http \
+		--src glean/lang/clang \
+		--src glean/lsp \
+		--arg=--unit=id
