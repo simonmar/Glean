@@ -20,7 +20,9 @@ import Data.Maybe
 import Data.Ord (comparing)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Text.Utf16.Rope.Mixed as Rope
 import qualified Language.LSP.Server as LSP
+import qualified Language.LSP.VFS as LSP
 import Language.LSP.Server (LspM)
 import qualified Language.LSP.Protocol.Message as LSP
 import qualified Language.LSP.Protocol.Types as LSP
@@ -44,8 +46,10 @@ import qualified Glean.Glass.Handler.Symbols as Glass.Handler
 
 import Data.ConcurrentCache as ConcurrentCache
 import Data.Path as Path
+import Glean.LSP.Diff
 
 {- TODO / ideas
+  - use withProgress for long operations, e.g. fetching symbols
   - go to decl / go to impl / go to type def?
   - call hierarchy
   - documentSymbols:
@@ -104,12 +108,17 @@ instance Default LspConfig where
 
 -- | Environment of the running LSP server after initialisation
 data LspEnv = LspEnv {
-    options :: LspOptions,
-    wsRoot :: AbsPath,
-    glass :: Glass.Env,
-    symbolCache :: ConcurrentCache RelPath Glass.DocumentSymbolIndex,
-    requests :: IORef (HashMap LSP.SomeLspId (Async ()))
-  }
+  options :: LspOptions,
+  wsRoot :: AbsPath,
+  glass :: Glass.Env,
+  symbolCache :: ConcurrentCache RelPath Glass.DocumentSymbolIndex,
+  diffCache :: ConcurrentCache RelPath (Maybe DiffState),
+  requests :: IORef (HashMap LSP.SomeLspId (Async ()))
+}
+
+data DiffState = DiffState {
+  diffMap :: DiffMap -- maps indexed source to current source
+}
 
 newtype GleanLspM a =
   GleanLspM { unGleanLspM :: ReaderT (IORef (Maybe LspEnv)) (LspM LspConfig) a }
@@ -219,8 +228,10 @@ initServer glass options envRef serverConfig _msg = do
     wsRoot <- ExceptT $ LSP.runLspT serverConfig getWsRoot
     wsRoot <- filePathToAbs wsRoot
     symbolCache <- ConcurrentCache.new
+    diffCache <- ConcurrentCache.new
     requests <- newIORef HashMap.empty
-    writeIORef envRef (Just LspEnv { options, glass, wsRoot, symbolCache, requests })
+    writeIORef envRef $
+      Just LspEnv { options, glass, wsRoot, symbolCache, requests, diffCache }
     liftIO $ logInfo $ "wsRoot: " <> Text.pack (Path.toFilePath wsRoot)
     pure serverConfig
   where
@@ -278,7 +289,7 @@ serverDef glass options = do
                 -- , handlePrepareRenameRequest
                 , handleCancelNotification
                 , handleDidOpen
-                -- , handleDidChange
+                , handleDidChange
                 -- , handleDidSave
                 , handleDidClose
                 , handleWorkspaceSymbol
@@ -356,13 +367,18 @@ handleDidClose =
     path <- uriToAbsPath uri
     removeCachedSymbols path
 
+handleDidChange :: LSP.Handlers GleanLspM
+handleDidChange =
+  LSP.notificationHandler LSP.SMethod_TextDocumentDidChange $ \message -> do
+    let params = message._params
+    flushDiffCache params._textDocument._uri
+
 handleDocumentSymbols :: LSP.Handlers GleanLspM
 handleDocumentSymbols =
   LSP.requestHandler LSP.SMethod_TextDocumentDocumentSymbol $ asyncRequest $ \req ->
     logTimed ("documentSymbols: " <> req._params._textDocument._uri.getUri) $ do
       let params = req._params
-      path <- uriToAbsPath params._textDocument._uri
-      syms <- getDocumentSymbols path
+      syms <- getDocumentSymbols params._textDocument._uri
       liftIO $ logInfo $ "symbols: " <> Text.pack (show (length syms))
       return $ Right $ LSP.InR $ LSP.InL syms
 
@@ -372,8 +388,7 @@ handleDefinitionRequest =
     let params = req._params
     logTimed ("definition: " <> params._textDocument._uri.getUri <>
       Text.pack (show req._params._position)) $ do
-      path <- uriToAbsPath params._textDocument._uri
-      defs <- getDefinition path params._position
+      defs <- getDefinition params._textDocument._uri params._position
       return $ Right . LSP.InR $ LSP.InL defs
 
 handleSetTrace :: LSP.Handlers GleanLspM
@@ -385,8 +400,8 @@ handleTextDocumentHoverRequest =
     let hoverParams = req._params
     logTimed ("hover: " <> hoverParams._textDocument._uri.getUri <>
       Text.pack (show hoverParams._position)) $ do
-      path <- uriToAbsPath hoverParams._textDocument._uri
-      hover <- retrieveHover path hoverParams._position
+      hover <- retrieveHover hoverParams._textDocument._uri
+        hoverParams._position
       return $ Right $ LSP.maybeToNull hover
 
 handleReferencesRequest :: LSP.Handlers GleanLspM
@@ -410,15 +425,32 @@ handleWorkspaceSymbol =
 -- Glean / Glass stuff
 
 getDefinition ::
-  AbsPath ->
+  LSP.Uri ->
   LSP.Position ->
   GleanLspM [LSP.DefinitionLink]
-getDefinition path lineCol = do
+getDefinition uri lineCol0 = do
   env <- getGleanLspEnv
-  symbols <- findSymbol lineCol <$> getSymbolsCached path
-  logInfo $ "getDefinition: " <> Text.pack (show symbols)
-  return $ fmap (LSP.DefinitionLink . locationToLocationLink) $
-    refTargets env.wsRoot symbols
+  indexedLineCol <- toIndexedPosition uri lineCol0
+  case indexedLineCol of
+    Nothing -> return [] -- not in indexed source
+    Just lineCol -> do
+      logInfo $ "getDefinition: " <> Text.pack (show (lineCol0, lineCol))
+      path <- uriToAbsPath uri
+      symbols <- findSymbol lineCol <$> getSymbolsCached path
+      logInfo $ "getDefinition: " <> Text.pack (show symbols)
+      fmap catMaybes $ forM (refTargets env.wsRoot symbols) $ \loc -> do
+        maybeLoc <- toCurrentLocation loc
+        case maybeLoc of
+          Nothing -> return Nothing
+          Just loc -> return $
+            Just $ LSP.DefinitionLink $ locationToLocationLink loc
+
+toIndexedPosition :: LSP.Uri -> LSP.Position -> GleanLspM (Maybe LSP.Position)
+toIndexedPosition uri pos = do
+  maybeDiffState <- getDiffState uri
+  case maybeDiffState of
+    Nothing -> return $ Just pos
+    Just diffState -> return $ mapPosition pos diffState.diffMap.toSource
 
 getSymbols ::
   RelPath ->
@@ -433,6 +465,9 @@ getSymbols path includeRefs = do
           , Glass.documentSymbolsRequest_filepath =
               Glass.Path (Text.pack (Path.toFilePath path))
           , Glass.documentSymbolsRequest_include_refs = includeRefs
+          , Glass.documentSymbolsRequest_include_content = True
+            -- we want the original source content, so we can continue
+            -- to provide intellisense after changes.
     }
     opts = def
   liftIO $ Glass.Handler.documentSymbolIndex env.glass query opts
@@ -455,6 +490,30 @@ removeCachedSymbols path = do
   let relPath = Path.makeRelative env.wsRoot path
   ConcurrentCache.remove relPath env.symbolCache
 
+getDiffState :: LSP.Uri -> GleanLspM (Maybe DiffState)
+getDiffState uri = do
+  env <- getGleanLspEnv
+  path <- uriToAbsPath uri
+  let relPath = Path.makeRelative env.wsRoot path
+  ConcurrentCache.insert relPath env.diffCache $ do
+    let normalizedUri = LSP.toNormalizedUri uri
+    virtualFile <- LSP.getVirtualFile normalizedUri >>= \case
+      Nothing -> throwIO $ GleanLspException "no virtual file"
+      Just f -> return f
+    syms <- getSymbolsCached path
+    case Glass.documentSymbolIndex_content syms of
+      Nothing -> return Nothing
+      Just ixSource -> return $ Just DiffState {
+        diffMap = diffMap (Rope.fromText ixSource) virtualFile._file_text
+      }
+
+flushDiffCache :: LSP.Uri -> GleanLspM ()
+flushDiffCache uri = do
+  env <- getGleanLspEnv
+  path <- uriToAbsPath uri
+  let relPath = Path.makeRelative env.wsRoot path
+  ConcurrentCache.remove relPath env.diffCache
+
 findSymbol ::
   LSP.Position ->
   Glass.DocumentSymbolIndex ->
@@ -472,20 +531,26 @@ findSymbol (LSP.Position l c) ix =
     (if line == le then col <= ce else True)
 
 retrieveHover ::
-  AbsPath ->
+  LSP.Uri ->
   LSP.Position ->
   GleanLspM (Maybe LSP.Hover)
-retrieveHover path position = do
-  syms <- getSymbolsCached path
-  case findSymbol position syms of
-    (sym:_) | Just ty <- attrSymbolSignature sym.symbolX_attributes -> do
-      -- TODO: pick the innermost match
-      logInfo $ "hover: " <> Text.pack (show sym)
-      return $ Just $ LSP.Hover
-        { _range = Just $ toLspRange sym.symbolX_range
-        , _contents = LSP.InL $ LSP.MarkupContent LSP.MarkupKind_PlainText ty
-        }
-    _ -> return Nothing
+retrieveHover uri position = do
+  indexedPosition <- toIndexedPosition uri position
+  case indexedPosition of
+    Nothing -> return Nothing
+    Just pos -> do
+      path <- uriToAbsPath uri
+      syms <- getSymbolsCached path
+      case findSymbol pos syms of
+        (sym:_) | Just ty <- attrSymbolSignature sym.symbolX_attributes -> do
+          -- TODO: pick the innermost match
+          logInfo $ "hover: " <> Text.pack (show sym)
+          return $ Just $ LSP.Hover
+            { _range = Just $ toLspRange sym.symbolX_range
+            , _contents = LSP.InL $
+                LSP.MarkupContent LSP.MarkupKind_PlainText ty
+            }
+        _ -> return Nothing
 
 findRefs ::
   AbsPath ->
@@ -504,7 +569,8 @@ findRefs path pos = do
       logInfo $ "found: " <> Text.pack (show defn)
       ranges <- liftIO $
         Glass.Handler.findReferenceRanges env.glass defn.symbolX_sym def
-      return (map (toLspLocation env.wsRoot) ranges)
+      fmap catMaybes $ forM ranges $ \range ->
+        toCurrentLocation (toLspLocation env.wsRoot range)
 
 -- | Document symbols, used to generate the outline.
 --
@@ -519,27 +585,37 @@ findRefs path pos = do
 -- want for the outline anyway.
 --
 getDocumentSymbols ::
-  AbsPath ->
+  LSP.Uri ->
   GleanLspM [LSP.DocumentSymbol]
-getDocumentSymbols path = do
+getDocumentSymbols uri = do
+  path <- uriToAbsPath uri
   syms <- getSymbolsCached path
+  maybeDiff <- getDiffState uri
   let
-    defs =
+    defs = sortBy (comparing (.symbolX_range))
       [ sym
       | sym <- concat $ Map.elems syms.documentSymbolIndex_symbols
       , isNothing sym.symbolX_target -- only definitions
       ]
-  return $ mkSymbolTree (sortBy (comparing (.symbolX_range)) defs)
+  return $ mkSymbolTree maybeDiff defs
+
+mkSymbolTree :: Maybe DiffState -> [Glass.SymbolX] -> [LSP.DocumentSymbol]
+mkSymbolTree maybeDiff syms = go syms
   where
-  mkSymbolTree [] = []
-  mkSymbolTree (sym : rest)
-    | Just name <- attrSymbolName sym.symbolX_attributes =
-      parent name : mkSymbolTree others
-    | otherwise = mkSymbolTree rest
+  fixRange = case maybeDiff of
+    Nothing -> Just
+    Just diffState -> \r -> mapRange r diffState.diffMap.toDest
+
+  go [] = []
+  go (sym:rest)
+    | Just name <- attrSymbolName sym.symbolX_attributes
+    , Just curRange <- fixRange (toLspRange sym.symbolX_range) =
+      parent name curRange : go others
+    | otherwise = go rest
     where
     (children, others) = span isChild rest
     isChild child = sym.symbolX_range `Glass.rangeContains` child.symbolX_range
-    parent name = LSP.DocumentSymbol {
+    parent name range = LSP.DocumentSymbol {
       _name = name,
       _detail = attrSymbolSignature sym.symbolX_attributes,
       _kind = kind,
@@ -547,12 +623,12 @@ getDocumentSymbols path = do
       _deprecated = Nothing,
       _range = range,
       _selectionRange = range,
-      _children = case mkSymbolTree children of
+      _children = case go children of
         [] -> Nothing
         some -> Just some
     }
-    kind = fromMaybe LSP.SymbolKind_Function (attrSymbolKind sym.symbolX_attributes)
-    range = toLspRange sym.symbolX_range
+    kind = fromMaybe LSP.SymbolKind_Function $
+      attrSymbolKind sym.symbolX_attributes
 
 symbolSearch ::
   Text ->
@@ -570,17 +646,37 @@ symbolSearch query = do
     }
     opts = def
   res <- liftIO $ Glass.Handler.searchSymbol env.glass req opts
-  return [
-    LSP.SymbolInformation {
-      _name = sym.symbolDescription_name.qualifiedName_localName.unName,
-      _kind = maybe LSP.SymbolKind_Function toLspSymbolKind sym.symbolDescription_kind,
-      _tags = Nothing,
-      _deprecated = Nothing,
-      _location = toLspLocation env.wsRoot sym.symbolDescription_sym_location,
-      _containerName = Nothing
-    }
-    | sym <- res.symbolSearchResult_symbolDetails
-    ]
+  fmap catMaybes $ forM res.symbolSearchResult_symbolDetails $ \sym -> do
+    maybeLoc <- toCurrentLocation $
+      toLspLocation env.wsRoot sym.symbolDescription_sym_location
+    forM maybeLoc $ \loc ->
+      return LSP.SymbolInformation {
+        _name = sym.symbolDescription_name.qualifiedName_localName.unName,
+        _kind = maybe LSP.SymbolKind_Function toLspSymbolKind sym.symbolDescription_kind,
+        _tags = Nothing,
+        _deprecated = Nothing,
+        _location = loc,
+        _containerName = Nothing
+      }
+
+-- | Update an LSP.Location that originated from Glean taking into
+-- account the diff between the indexed source and the current
+-- source. If the file is not open, this will just return the indexed
+-- location (opening all those files and fetching symbols from Glean
+-- would be too expensive).
+toCurrentLocation :: LSP.Location -> GleanLspM (Maybe LSP.Location)
+toCurrentLocation loc = do
+  let normalizedUri = LSP.toNormalizedUri loc._uri
+  virtualFile <- LSP.getVirtualFile normalizedUri
+  case virtualFile of
+    Nothing -> return (Just loc)
+    Just{} -> do
+      maybeDiff <- getDiffState loc._uri
+      case maybeDiff of
+        Nothing -> return (Just loc)
+        Just diffState -> return $
+          LSP.Location loc._uri <$>
+            mapRange loc._range diffState.diffMap.toDest
 
 -- -----------------------------------------------------------------------------
 -- Data conversion Glass <-> LSP
