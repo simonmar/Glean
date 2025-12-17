@@ -55,10 +55,15 @@ CXX_SOURCES_glean_cpp_rocksdb = \
     glean/rocksdb/ownership.cpp \
     glean/rocksdb/ffi.cpp \
     glean/rocksdb/rocksdb.cpp
+
+C_SOURCES_glean_cpp_rocksdb = \
+    glean/rocksdb/mdb.c \
+    glean/rocksdb/midl.c
+
 # -fno-rtti is needed because RocksDB is compiled with it, and we
 # get linker errors for references to missing typeinfo symbols if
 # we don't.
-CXX_FLAGS_glean_cpp_rocksdb = -fno-rtti -DOSS=1
+CXX_FLAGS_glean_cpp_rocksdb = -fno-rtti -DOSS=1 -DMDB_MAXKEYSIZE=0
 
 CXX_SOURCES_glean_cpp_client = \
     glean/cpp/filewriter.cpp \

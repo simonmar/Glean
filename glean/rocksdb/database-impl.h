@@ -102,7 +102,8 @@ struct DatabaseImpl final : Database {
     return stats_.get();
   }
 
-  bool lookupById(Id id, rocksdb::PinnableSlice& val) const;
+  bool lookupById(Txn &txn, Id id, MDB_val& val);
+    // returned memory is valid until txn is finished
 
   std::vector<size_t> loadOwnershipUnitCounters();
   folly::F14FastMap<uint64_t, size_t> loadOwnershipDerivedCounters();
@@ -212,16 +213,11 @@ extern const char* admin_names[];
 template <typename T>
 folly::Optional<T> readAdminValue(ContainerImpl& container_, AdminId id) {
   container_.requireOpen();
-  rocksdb::PinnableSlice val;
+  MDB_val val;
   binary::Output key;
   key.fixed(id);
-  auto s = container_.db->Get(
-      rocksdb::ReadOptions(),
-      container_.family(Family::admin),
-      slice(key),
-      &val);
-  if (!s.IsNotFound()) {
-    check(s);
+  auto txn = container_.txn_read();
+  if (txn.get(container_.family(Family::admin), slice(key), val)) {
     binary::Input value = input(val);
     auto result = value.fixed<T>();
     if (!value.empty()) {

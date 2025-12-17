@@ -10,52 +10,53 @@
 
 #include "glean/rts/binary.h"
 #include "glean/rts/error.h"
-
-#include <rocksdb/db.h>
+#include "lmdb.h"
 
 namespace facebook {
 namespace glean {
 namespace rocks {
 namespace impl {
 
-[[noreturn]] inline void error(const rocksdb::Status& s) {
-  rts::error("rocksdb: " + s.ToString());
+[[noreturn]] inline void error(int s) {
+  rts::error("rocksdb: {}", mdb_strerror(s));
 }
 
-inline void check(const rocksdb::Status& status) {
-  if (!status.ok()) {
+inline void check(int status) {
+  if (status != MDB_SUCCESS) {
     error(status);
   }
 }
 
-inline folly::ByteRange byteRange(const rocksdb::Slice& slice) {
+inline folly::ByteRange byteRange(const MDB_val& slice) {
   return folly::ByteRange(
-      reinterpret_cast<const unsigned char*>(slice.data()), slice.size());
+      reinterpret_cast<const unsigned char*>(slice.mv_data), slice.mv_size);
 }
 
-inline rocksdb::Slice slice(const folly::ByteRange& range) {
-  return rocksdb::Slice(
-      reinterpret_cast<const char*>(range.data()), range.size());
+inline MDB_val slice(const folly::ByteRange& range) {
+  return {
+      .mv_size = range.size(),
+      .mv_data = (void*)(range.data())
+  };
 }
 
-inline rocksdb::Slice slice(binary::Output& output) {
+inline MDB_val slice(binary::Output& output) {
   return slice(output.bytes());
 }
 
 template <typename T>
-inline rocksdb::Slice toSlice(const T& x) {
-  return rocksdb::Slice(reinterpret_cast<const char*>(&x), sizeof(x));
+inline MDB_val toSlice(T& x) {
+  return MDB_val { sizeof(x), reinterpret_cast<void*>(&x) };
 }
 
 template <typename T>
-inline T fromSlice(const rocksdb::Slice& slice) {
-  assert(slice.size() == sizeof(T));
+inline T fromSlice(const MDB_val& slice) {
+  assert(slice.mv_size == sizeof(T));
   T x;
-  std::memcpy(&x, slice.data(), slice.size());
+  std::memcpy(&x, slice.mv_data, slice.mv_size);
   return x;
 }
 
-inline binary::Input input(const rocksdb::Slice& slice) {
+inline binary::Input input(const MDB_val& slice) {
   return binary::Input(byteRange(slice));
 }
 

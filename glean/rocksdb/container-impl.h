@@ -11,9 +11,6 @@
 #include "glean/rocksdb/rocksdb.h"
 #include "glean/rocksdb/util.h"
 
-#include <rocksdb/db.h>
-#include <rocksdb/utilities/backup_engine.h>
-
 namespace facebook {
 namespace glean {
 namespace rocks {
@@ -21,11 +18,10 @@ namespace impl {
 
 struct Family {
  private:
-  template <typename F>
-  Family(const char* n, F&& o, bool keep_ = true)
+  Family(const char* n, unsigned int flags_, bool keep_ = true)
       : index(families.size()),
         name(n),
-        options(std::forward<F>(o)),
+        flags(flags_),
         keep(keep_) {
     families.push_back(this);
   }
@@ -38,7 +34,7 @@ struct Family {
  public:
   size_t index;
   const char* name;
-  std::function<void(rocksdb::ColumnFamilyOptions&)> options;
+  unsigned int flags;
 
   // Whether to keep this column family after the DB is complete. If
   // keep = false, then the contents of the column family will be
@@ -76,13 +72,115 @@ struct Family {
   }
 };
 
+struct Cursor {
+    Cursor() : cursor(nullptr, &mdb_cursor_close) {}
+    Cursor(MDB_txn *txn, MDB_dbi dbi) :
+        cursor(nullptr, &mdb_cursor_close) {
+      MDB_cursor *c;
+      check(mdb_cursor_open(txn, dbi, &c));
+      cursor.reset(c);
+    }
+
+    bool seek_first() { return seek_op(MDB_FIRST); }
+
+    bool seek_last() { return seek_op(MDB_LAST); }
+
+    bool seek_op(MDB_cursor_op op) {
+      int s = mdb_cursor_get(ptr(), &key_, &value_, op);
+      if (s == MDB_SUCCESS) {
+          // needed?
+          check(mdb_cursor_get(ptr(), &key_, &value_, MDB_GET_CURRENT));
+          valid_ = true;
+      }
+      else if (s == MDB_NOTFOUND) {
+          valid_ = false;
+      }
+      else {
+          check(s);
+      }
+      return valid_;
+    }
+
+    bool seek_key(MDB_val key) {
+      key_ = key;
+      int s = mdb_cursor_get(ptr(), &key_, &value_, MDB_SET_RANGE);
+      if (s == MDB_SUCCESS) {
+          // needed?
+          check(mdb_cursor_get(ptr(), &key_, &value_, MDB_GET_CURRENT));
+          valid_ = true;
+      }
+      else if (s == MDB_NOTFOUND) {
+          valid_ = false;
+      }
+      else {
+          check(s);
+      }
+      return valid_;
+    }
+
+    bool next() { return seek_op(MDB_NEXT); }
+
+    bool valid() { return valid_; }
+
+    MDB_val& key() { return key_; }
+    MDB_val& value() { return value_; }
+
+    MDB_cursor *ptr() {
+        return cursor.get();
+    }
+
+  private:
+    std::unique_ptr<MDB_cursor, decltype(&mdb_cursor_close)> cursor;
+    MDB_val key_, value_;
+    bool valid_;
+
+};
+
+struct Txn {
+    Txn(MDB_env *env, unsigned int flags = 0) : txn(nullptr, &mdb_txn_abort) {
+        MDB_txn* t;
+        check(mdb_txn_begin(env, NULL, flags, &t));
+        txn.reset(t);
+    }
+
+    bool get(MDB_dbi db, MDB_val k, MDB_val& v) {
+        int s = mdb_get(txn.get(), db, &k, &v);
+        if (s == MDB_SUCCESS) {
+            return true;
+        } else if (s == MDB_NOTFOUND) {
+            return false;
+        } else {
+            check(s);
+            return false;
+        }
+    }
+
+    void put(MDB_dbi db, MDB_val k, MDB_val v) {
+        check(mdb_put(txn.get(), db, &k, &v, 0));
+    }
+
+    Cursor cursor(MDB_dbi dbi) {
+        return Cursor(txn.get(), dbi);
+    }
+
+    MDB_txn* ptr() {
+        return txn.get();
+    }
+
+    void commit() {
+        if (txn) {
+            check(mdb_txn_commit(txn.release()));
+        }
+    }
+
+  private:
+    std::unique_ptr<MDB_txn, decltype(&mdb_txn_abort)> txn;
+};
+
 struct ContainerImpl final : Container {
   Mode mode;
-  rocksdb::Options options;
-  rocksdb::WriteOptions writeOptions;
-  std::unique_ptr<rocksdb::DB> db;
-  std::vector<rocksdb::ColumnFamilyHandle*> families;
-  std::shared_ptr<rocksdb::Statistics> statistics;
+  std::unique_ptr<MDB_env, decltype(&mdb_env_close)> db;
+  std::vector<MDB_dbi> families;
 
   ContainerImpl(
       const std::string& path,
@@ -115,7 +213,15 @@ struct ContainerImpl final : Container {
 
   void optimize(bool compact) override;
 
-  rocksdb::ColumnFamilyHandle* family(const Family& family) const;
+  MDB_dbi family(const Family& family) const;
+
+  Txn txn_write() {
+      return Txn(db.get());
+  };
+
+  Txn txn_read() {
+      return Txn(db.get(), MDB_RDONLY);
+  };
 };
 
 } // namespace impl

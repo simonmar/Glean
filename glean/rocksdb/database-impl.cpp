@@ -46,11 +46,12 @@ T initAdminValue(
       key.fixed(id);
       binary::Output value;
       value.fixed(def);
-      check(container_.db->Put(
-          container_.writeOptions,
+      Txn txn = container_.txn_write();
+      txn.put(
           container_.family(Family::admin),
           slice(key),
-          slice(value)));
+          slice(value));
+      txn.commit();
     }
     return def;
   }
@@ -136,20 +137,13 @@ DatabaseImpl::DatabaseImpl(
 rts::PredicateStats DatabaseImpl::loadStats() {
   container_.requireOpen();
   rts::PredicateStats stats;
-  std::unique_ptr<rocksdb::Iterator> iter(container_.db->NewIterator(
-      rocksdb::ReadOptions(), container_.family(Family::stats)));
-  if (!iter) {
-    rts::error("rocksdb: couldn't allocate iterator");
-  }
+  Txn txn = container_.txn_read();
+  Cursor cur = txn.cursor(container_.family(Family::stats));
 
-  for (iter->SeekToFirst(); iter->Valid(); iter->Next()) {
-    binary::Input key(byteRange(iter->key()));
-    stats[key.fixed<Pid>()] = fromSlice<MemoryStats>(iter->value());
+  for (cur.seek_first(); cur.valid(); cur.next()) {
+    binary::Input key(byteRange(cur.key()));
+    stats[key.fixed<Pid>()] = fromSlice<MemoryStats>(cur.value());
     assert(key.empty());
-  }
-  auto s = iter->status();
-  if (!s.IsNotFound()) {
-    check(s);
   }
   return stats;
 }
@@ -160,16 +154,14 @@ Id DatabaseImpl::idByKey(Pid type, folly::ByteRange key) {
   }
 
   container_.requireOpen();
-  rocksdb::PinnableSlice out;
   binary::Output k;
   k.fixed(type);
   k.put(key);
-  auto s = container_.db->Get(
-      rocksdb::ReadOptions(), container_.family(Family::keys), slice(k), &out);
-  if (s.IsNotFound()) {
+  Txn txn = container_.txn_read();
+  MDB_val out;
+  if (!txn.get(container_.family(Family::keys), slice(k), out)) {
     return Id::invalid();
   } else {
-    check(s);
     binary::Input value = input(out);
     auto id = value.fixed<Id>();
     assert(value.empty());
@@ -179,8 +171,9 @@ Id DatabaseImpl::idByKey(Pid type, folly::ByteRange key) {
 
 Pid DatabaseImpl::typeById(Id id) {
   container_.requireOpen();
-  rocksdb::PinnableSlice val;
-  if (lookupById(id, val)) {
+  MDB_val val;
+  Txn txn = container_.txn_read();
+  if (lookupById(txn, id, val)) {
     return input(val).packed<Pid>();
   } else {
     return Pid::invalid();
@@ -189,7 +182,7 @@ Pid DatabaseImpl::typeById(Id id) {
 
 namespace {
 
-rts::Fact::Ref decomposeFact(Id id, const rocksdb::Slice& data) {
+rts::Fact::Ref decomposeFact(Id id, const MDB_val& data) {
   auto inp = input(data);
   const auto ty = inp.packed<Pid>();
   const auto key_size = inp.packed<uint32_t>();
@@ -200,8 +193,9 @@ rts::Fact::Ref decomposeFact(Id id, const rocksdb::Slice& data) {
 
 bool DatabaseImpl::factById(Id id, std::function<void(Pid, Fact::Clause)> f) {
   container_.requireOpen();
-  rocksdb::PinnableSlice val;
-  if (lookupById(id, val)) {
+  MDB_val val;
+  Txn txn = container_.txn_read();
+  if (lookupById(txn, id, val)) {
     auto ref = decomposeFact(id, val);
     f(ref.type, ref.clause);
     return true;
@@ -210,24 +204,13 @@ bool DatabaseImpl::factById(Id id, std::function<void(Pid, Fact::Clause)> f) {
   }
 }
 
-bool DatabaseImpl::lookupById(Id id, rocksdb::PinnableSlice& val) const {
+bool DatabaseImpl::lookupById(Txn &txn, Id id, MDB_val& val) {
   if (id < startingId() || id >= firstFreeId()) {
     return false;
   }
   binary::Output key;
   key.nat(id.toWord());
-  val.Reset();
-  auto s = container_.db->Get(
-      rocksdb::ReadOptions(),
-      container_.family(Family::entities),
-      slice(key),
-      &val);
-  if (s.IsNotFound()) {
-    return false;
-  } else {
-    check(s);
-    return true;
-  }
+  return txn.get(container_.family(Family::entities), slice(key), val);
 }
 
 namespace {
@@ -237,48 +220,37 @@ struct SeekIterator final : rts::FactIterator {
       folly::ByteRange start,
       size_t prefix_size,
       Pid type,
-      const DatabaseImpl* db)
-      : upper_bound_(
+      DatabaseImpl* db)
+      : txn_(db->container_.txn_read()),
+        iter_(txn_.cursor(db->container_.family(Family::keys))),
+        upper_bound_(
             binary::lexicographicallyNext({start.data(), prefix_size})),
-        upper_bound_slice_(
-            reinterpret_cast<const char*>(upper_bound_.data()),
-            upper_bound_.size()),
         type_(type),
         db_(db) {
     assert(prefix_size <= start.size());
-    // both upper_bound_slice_ and options_ need to be alive for the duration
-    // of the iteration
-    options_.iterate_upper_bound = &upper_bound_slice_;
-    iter_.reset(db->container_.db->NewIterator(
-        options_, db->container_.family(Family::keys)));
-    if (iter_) {
-      iter_->Seek(slice(start));
-    } else {
-      rts::error("rocksdb: couldn't allocate iterator");
-    }
+    iter_.seek_key(slice(start));
   }
 
   void next() override {
-    iter_->Next();
-    auto s = iter_->status();
-    if (!s.IsNotFound()) {
-      check(s);
-    }
+    iter_.next();
   }
 
   Fact::Ref get(Demand demand) override {
-    if (iter_->Valid()) {
-      auto key = input(iter_->key());
+    if (iter_.valid()) {
+      if (memcmp(iter_.key().mv_data, upper_bound_.data(), upper_bound_.size()) >= 0) {
+          return Fact::Ref::invalid();
+      }
+      auto key = input(iter_.key());
       [[maybe_unused]] auto ty = key.fixed<Pid>();
       assert(ty == type_);
-      auto value = input(iter_->value());
+      auto value = input(iter_.value());
       auto id = value.fixed<Id>();
       assert(value.empty());
 
       if (demand == KeyOnly) {
         return Fact::Ref{id, type_, Fact::Clause::fromKey(key.bytes())};
       } else {
-        [[maybe_unused]] auto found = db_->lookupById(id, slice_);
+        [[maybe_unused]] auto found = db_->lookupById(txn_, id, slice_);
         assert(found);
         return decomposeFact(id, slice_);
       }
@@ -294,13 +266,12 @@ struct SeekIterator final : rts::FactIterator {
     return std::nullopt;
   }
 
-  const std::vector<unsigned char> upper_bound_;
-  const rocksdb::Slice upper_bound_slice_;
+  std::vector<unsigned char> upper_bound_;
   const Pid type_;
-  rocksdb::ReadOptions options_;
-  std::unique_ptr<rocksdb::Iterator> iter_;
-  const DatabaseImpl* db_;
-  rocksdb::PinnableSlice slice_;
+  Txn txn_;
+  Cursor iter_;
+  DatabaseImpl* db_;
+  MDB_val slice_;
 };
 
 } // namespace
@@ -336,7 +307,7 @@ std::unique_ptr<rts::FactIterator> DatabaseImpl::seekWithinSection(
 
 namespace {
 
-template <typename Direction>
+template<typename Direction>
 struct EnumerateIterator final : rts::FactIterator {
   static std::vector<char> encode(Id id) {
     std::vector<char> v(rts::MAX_NAT_SIZE);
@@ -346,39 +317,29 @@ struct EnumerateIterator final : rts::FactIterator {
     return v;
   }
 
-  explicit EnumerateIterator(Id start, Id bound, const DatabaseImpl* db)
-      : bound_(encode(bound)), bound_slice_(bound_.data(), bound_.size()) {
-    // both the slice and options_ need to be alive for the duration
-    // of the iteration
-    options_.*Direction::iterate_bound = &bound_slice_;
-    iter_.reset(db->container_.db->NewIterator(
-        options_, db->container_.family(Family::entities)));
-
+  explicit EnumerateIterator(Id start, Id bound, DatabaseImpl* db)
+      : bound_(bound),
+        txn_(db->container_.txn_read()),
+        iter_(txn_.cursor(db->container_.family(Family::entities))) {
     auto st = encode(start);
-    if (iter_) {
-      (iter_.get()->*Direction::seek)({st.data(), st.size()});
-    } else {
-      rts::error("rocksdb: couldn't allocate iterator");
-    }
+    iter_.seek_key({st.size(), st.data()});
   }
 
   void next() override {
-    (iter_.get()->*Direction::next)();
-    auto s = iter_->status();
-    if (!s.IsNotFound()) {
-      check(s);
-    }
+    iter_.seek_op(Direction::next);
   }
 
   Fact::Ref get(Demand /*unused*/) override {
-    return iter_->Valid()
-        ? decomposeFact(
-              Id::fromWord(loadTrustedNat(
-                               reinterpret_cast<const unsigned char*>(
-                                   iter_->key().data()))
-                               .first),
-              iter_->value())
-        : Fact::Ref::invalid();
+    if (iter_.valid()) {
+        Id id = Id::fromWord(loadTrustedNat(
+                                 reinterpret_cast<const unsigned char*>(
+                                   iter_.key().mv_data))
+                               .first);
+        if (Direction::inside(id, bound_)) {
+            return decomposeFact(id,iter_.value());
+        }
+    }
+    return Fact::Ref::invalid();
   }
 
   std::optional<Id> lower_bound() override {
@@ -388,10 +349,9 @@ struct EnumerateIterator final : rts::FactIterator {
     return std::nullopt;
   }
 
-  const std::vector<char> bound_;
-  const rocksdb::Slice bound_slice_;
-  rocksdb::ReadOptions options_;
-  std::unique_ptr<rocksdb::Iterator> iter_;
+  Id bound_;
+  Txn txn_;
+  Cursor iter_;
 };
 
 struct Forward {
@@ -406,10 +366,8 @@ struct Forward {
     }
   }
 
-  static inline constexpr auto iterate_bound =
-      &rocksdb::ReadOptions::iterate_upper_bound;
-  static inline constexpr auto seek = &rocksdb::Iterator::Seek;
-  static inline constexpr auto next = &rocksdb::Iterator::Next;
+  static bool inside(Id cur, Id bound) { return cur < bound; }
+  static inline constexpr auto next = MDB_NEXT;
 };
 
 struct Backward {
@@ -424,10 +382,8 @@ struct Backward {
     }
   }
 
-  static inline constexpr auto iterate_bound =
-      &rocksdb::ReadOptions::iterate_lower_bound;
-  static inline constexpr auto seek = &rocksdb::Iterator::SeekForPrev;
-  static inline constexpr auto next = &rocksdb::Iterator::Prev;
+  static bool inside(Id cur, Id bound) { return cur > bound; }
+  static inline constexpr auto next = MDB_PREV;
 };
 
 } // namespace
@@ -469,7 +425,7 @@ void DatabaseImpl::commit(rts::FactSet& facts) {
         next_id);
   }
 
-  rocksdb::WriteBatch batch;
+  Txn txn = container_.txn_write();
 
   // NOTE: We do *not* support concurrent writes so we don't need to protect
   // stats_ here because nothing should be able to replace it while we're
@@ -482,7 +438,7 @@ void DatabaseImpl::commit(rts::FactSet& facts) {
 
     uint64_t mem = 0;
     auto put = [&](auto family, const auto& key, const auto& value) {
-      check(batch.Put(family, key, value));
+      txn.put(family, key, value);
       mem += key.size();
       mem += value.size();
     };
@@ -495,7 +451,7 @@ void DatabaseImpl::commit(rts::FactSet& facts) {
       v.packed(fact.clause.key_size);
       v.put({fact.clause.data, fact.clause.size()});
 
-      put(container_.family(Family::entities), slice(k), slice(v));
+      txn.put(container_.family(Family::entities), slice(k), slice(v));
     }
 
     {
@@ -505,28 +461,31 @@ void DatabaseImpl::commit(rts::FactSet& facts) {
       binary::Output v;
       v.fixed(fact.id);
 
-      put(container_.family(Family::keys), slice(k), slice(v));
+      txn.put(container_.family(Family::keys), slice(k), slice(v));
     }
 
     new_stats[fact.type] += MemoryStats::one(mem);
   }
 
   const auto first_free_id = facts.firstFreeId();
-  check(batch.Put(
+  auto tmp1 = AdminId::NEXT_ID;
+  auto tmp2 = first_free_id;
+  txn.put(
       container_.family(Family::admin),
-      toSlice(AdminId::NEXT_ID),
-      toSlice(first_free_id)));
+      toSlice(tmp1),
+      toSlice(tmp2));
 
   for (const auto& x : new_stats) {
     if (x.second != old_stats.get(x.first)) {
-      check(batch.Put(
+      auto tmp = x.first.toWord();
+      txn.put(
           container_.family(Family::stats),
-          toSlice(x.first.toWord()),
-          toSlice(x.second)));
+          toSlice(tmp),
+          toSlice(x.second));
     }
   }
 
-  check(container_.db->Write(container_.writeOptions, &batch));
+  txn.commit();
   next_id = first_free_id;
 
   stats_.set(std::move(new_stats));

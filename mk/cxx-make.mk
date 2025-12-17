@@ -8,11 +8,10 @@
 # Building C++ libraries via make
 #
 
-FOLLY_INCLUDES := $(shell pkg-config --cflags-only-I libfolly)
 ARCH := $(firstword $(subst -, ,$(shell $(CC) -dumpmachine)))
 
 # TODO: This is duplicated in glean.cabal.in
-CXXFLAGS += -I. -Ihsthrift/common/util $(FOLLY_INCLUDES) -std=c++17
+CXXFLAGS += -I. -Ihsthrift/common/util -Ihsthrift/folly-clib/folly -Ihsthrift/folly-clib/folly/_build -std=c++17 -g
 ifeq ($(ARCH), x86_64)
 CXXFLAGS += -march=haswell
 endif
@@ -47,12 +46,13 @@ cxx-libraries: $(CXX_LIBRARIES)
 # have to fiddle with LD_LIBRARY_PATH to actual run things.
 #
 define define_library
- CXX_OBJECTS_$1 = $$(addprefix $$(CXX_OBJ_DIR)/,$$(CXX_SOURCES_$1:.cpp=.o))
+ CXX_OBJECTS_$1 = $$(addprefix $$(CXX_OBJ_DIR)/,$$(CXX_SOURCES_$1:.cpp=.o)) 
+ C_OBJECTS_$1 = $$(addprefix $$(CXX_OBJ_DIR)/,$$(C_SOURCES_$1:.c=.o))
  CXX_LIB_$1 = $$(CXX_LIB_DIR)/lib$1.a
  .PHONY: $1
  $1:: $$(CXX_LIB_$1)
 
- $$(CXX_LIB_$1): $$(CXX_OBJECTS_$1)
+ $$(CXX_LIB_$1): $$(CXX_OBJECTS_$1) $$(C_OBJECTS_$1)
 	@mkdir -p $$(@D)
 	$$(AR) rcs $$@ $$^
 
@@ -60,13 +60,17 @@ define define_library
 	@mkdir -p $$(@D)
 	$$(CXX) -o $$@ $$(CXXFLAGS) $$(CXX_FLAGS_$1) -fPIC -MMD -MP -c $$<
 
+ $$(C_OBJECTS_$1): $(CXX_OBJ_DIR)/%.o: %.c
+	@mkdir -p $$(@D)
+	$$(CXX) -x c -o $$@ $$(CXXFLAGS) $$(CXX_FLAGS_$1) -fPIC -MMD -MP -c $$<
+
  -include $$(CXX_OBJECTS_$1:.o=.d)
 endef
 
 # Call define_library for each library
 $(foreach lib, $(CXX_LIBRARIES), $(eval $(call define_library,$(lib))))
 
-GTEST_PKGCONFIG_DEPS = libfolly libunwind libglog icu-uc gflags libxxhash gtest_main
+GTEST_PKGCONFIG_DEPS = libunwind libglog icu-uc gflags libxxhash gtest_main
 
 GTEST_PKGCONFIG_LIBS := $(shell pkg-config --libs $(GTEST_PKGCONFIG_DEPS))
 

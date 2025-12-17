@@ -14,7 +14,7 @@ namespace glean {
 namespace rocks {
 
 std::shared_ptr<Cache> newCache(size_t capacity) {
-  return rocksdb::NewLRUCache(capacity);
+  return {};
 }
 
 std::unique_ptr<Container> open(

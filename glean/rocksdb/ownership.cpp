@@ -26,6 +26,7 @@ std::vector<size_t> DatabaseImpl::loadOwnershipUnitCounters() {
   container_.requireOpen();
   std::vector<size_t> result;
 
+#ifdef LATER
   std::unique_ptr<rocksdb::Iterator> iter(container_.db->NewIterator(
       rocksdb::ReadOptions(), container_.family(Family::ownershipRaw)));
 
@@ -46,6 +47,9 @@ std::vector<size_t> DatabaseImpl::loadOwnershipUnitCounters() {
   }
 
   return result;
+#else
+  return {};
+#endif
 }
 
 folly::F14FastMap<uint64_t, size_t>
@@ -53,6 +57,7 @@ DatabaseImpl::loadOwnershipDerivedCounters() {
   container_.requireOpen();
   folly::F14FastMap<uint64_t, size_t> result;
 
+#ifdef LATER
   std::unique_ptr<rocksdb::Iterator> iter(container_.db->NewIterator(
       rocksdb::ReadOptions(), container_.family(Family::ownershipDerivedRaw)));
 
@@ -69,10 +74,14 @@ DatabaseImpl::loadOwnershipDerivedCounters() {
 
   VLOG(1) << "derived fact owners for " << result.size() << " pids";
   return result;
+#else
+  return {};
+#endif
 }
 
 namespace {
 
+#ifdef LATER
 void putOwnerSet(
     ContainerImpl& container,
     rocksdb::WriteBatch& batch,
@@ -87,8 +96,10 @@ void putOwnerSet(
   check(batch.Put(
       container.family(Family::ownershipSets), slice(key), slice(value)));
 }
+#endif
 
 std::unique_ptr<rts::OwnershipSetIterator> getSetIterator(DatabaseImpl& db) {
+#ifdef LATER
   struct SetIterator : rts::OwnershipSetIterator {
     explicit SetIterator(
         size_t first,
@@ -121,6 +132,7 @@ std::unique_ptr<rts::OwnershipSetIterator> getSetIterator(DatabaseImpl& db) {
       } else {
         return folly::none;
       }
+    return folly::none;
     }
 
     std::pair<size_t, size_t> sizes() const override {
@@ -133,7 +145,9 @@ std::unique_ptr<rts::OwnershipSetIterator> getSetIterator(DatabaseImpl& db) {
     size_t first_, size_;
     std::unique_ptr<rocksdb::Iterator> iter;
   };
+#endif
 
+#ifdef LATER
   std::unique_ptr<rocksdb::Iterator> iter(db.container_.db->NewIterator(
       rocksdb::ReadOptions(), db.container_.family(Family::ownershipSets)));
 
@@ -162,6 +176,9 @@ std::unique_ptr<rts::OwnershipSetIterator> getSetIterator(DatabaseImpl& db) {
   }
 
   return std::make_unique<SetIterator>(first, size, std::move(iter));
+#else
+  return {};
+#endif
 }
 
 } // namespace
@@ -169,6 +186,7 @@ std::unique_ptr<rts::OwnershipSetIterator> getSetIterator(DatabaseImpl& db) {
 std::unique_ptr<Usets> DatabaseImpl::loadOwnershipSets() {
   auto t = makeAutoTimer("loadOwnershipSets");
 
+#ifdef LATER
   auto iter = getSetIterator(*this);
   auto pair = iter->sizes();
   auto first = pair.first;
@@ -197,9 +215,13 @@ std::unique_ptr<Usets> DatabaseImpl::loadOwnershipSets() {
             << stats.bytes << " bytes";
 
   return usets;
+#else
+  return std::make_unique<Usets>(0);
+#endif
 }
 
 folly::Optional<uint32_t> DatabaseImpl::getUnitId(folly::ByteRange unit) {
+#ifdef LATER
   rocksdb::PinnableSlice val;
   auto s = container_.db->Get(
       rocksdb::ReadOptions(),
@@ -213,9 +235,13 @@ folly::Optional<uint32_t> DatabaseImpl::getUnitId(folly::ByteRange unit) {
   } else {
     return folly::none;
   }
+#else
+  return folly::none;
+#endif
 }
 
 folly::Optional<std::string> DatabaseImpl::getUnit(uint32_t unit_id) {
+#ifdef LATER
   rocksdb::PinnableSlice val;
   EncodedNat key(unit_id);
   auto s = container_.db->Get(
@@ -229,6 +255,9 @@ folly::Optional<std::string> DatabaseImpl::getUnit(uint32_t unit_id) {
   } else {
     return folly::none;
   }
+#else
+  return folly::none;
+#endif
 }
 
 // Called once per batch inside Store.commit.
@@ -247,6 +276,8 @@ void DatabaseImpl::addOwnership(const std::vector<OwnershipSet>& ownership) {
 
   size_t new_count = 0;
   std::vector<size_t> touched;
+
+#ifdef LATER
   rocksdb::WriteBatch batch;
 
   for (const auto& set : ownership) {
@@ -302,27 +333,34 @@ void DatabaseImpl::addOwnership(const std::vector<OwnershipSet>& ownership) {
   }
   ownership_unit_counters.insert(ownership_unit_counters.end(), new_count, 1);
   CHECK_EQ(next_uset_id, ownership_unit_counters.size() + first_unit_id);
+
+#endif
 }
 
 std::unique_ptr<rts::DerivedFactOwnershipIterator>
 DatabaseImpl::getDerivedFactOwnershipIterator(Pid pid) {
   struct DerivedFactIterator : rts::DerivedFactOwnershipIterator {
-    explicit DerivedFactIterator(Pid pid, std::unique_ptr<rocksdb::Iterator> i)
-        : pid_(pid), iter(std::move(i)) {}
+    explicit DerivedFactIterator(Pid pid, ContainerImpl& container_)
+        : pid_(pid),
+          txn(container_.txn_read()),
+          iter(txn.ptr(), container_.family(Family::ownershipDerivedRaw)) {
+        EncodedNat key(pid.toWord());
+        iter.seek_key(slice(key.byteRange()));
+    }
 
     folly::Optional<DerivedFactOwnership> get() override {
-      if (iter->Valid()) {
-        binary::Input key(byteRange(iter->key()));
+      if (iter.valid()) {
+        binary::Input key(byteRange(iter.key()));
         auto pid = key.trustedNat();
         if (pid != pid_.toWord()) {
           return {};
         }
-        const auto val = iter->value();
-        const size_t elts = val.size() / (sizeof(uint32_t) + sizeof(uint64_t));
-        const Id* ids = reinterpret_cast<const Id*>(val.data());
+        const auto val = iter.value();
+        const size_t elts = val.mv_size / (sizeof(uint32_t) + sizeof(uint64_t));
+        const Id* ids = reinterpret_cast<const Id*>(val.mv_data);
         const UsetId* owners = reinterpret_cast<const UsetId*>(
-            val.data() + elts * sizeof(uint64_t));
-        iter->Next();
+            reinterpret_cast<uint8_t*>(val.mv_data) + elts * sizeof(uint64_t));
+        iter.next();
         return rts::DerivedFactOwnership{{ids, elts}, {owners, elts}};
       } else {
         return folly::none;
@@ -330,58 +368,48 @@ DatabaseImpl::getDerivedFactOwnershipIterator(Pid pid) {
     }
 
     Pid pid_;
-    std::unique_ptr<rocksdb::Iterator> iter;
+    Txn txn;
+    Cursor iter;
   };
 
-  std::unique_ptr<rocksdb::Iterator> iter(container_.db->NewIterator(
-      rocksdb::ReadOptions(), container_.family(Family::ownershipDerivedRaw)));
-
-  if (!iter) {
-    rts::error("rocksdb: couldn't allocate derived ownership iterator");
-  }
-
-  EncodedNat key(pid.toWord());
-  iter->Seek(slice(key.byteRange()));
-  return std::make_unique<DerivedFactIterator>(pid, std::move(iter));
+  return std::make_unique<DerivedFactIterator>(pid, container_);
 }
 
 std::unique_ptr<rts::OwnershipUnitIterator>
 DatabaseImpl::getOwnershipUnitIterator() {
   struct UnitIterator : rts::OwnershipUnitIterator {
-    explicit UnitIterator(std::unique_ptr<rocksdb::Iterator> i)
-        : iter(std::move(i)) {}
+    explicit UnitIterator(ContainerImpl &container_)
+        : txn(container_.txn_read()),
+          iter(txn.ptr(), container_.family(Family::ownershipRaw)) {
+        iter.seek_first();
+    }
 
     folly::Optional<rts::OwnershipUnit> get() override {
-      if (iter->Valid()) {
-        binary::Input key(byteRange(iter->key()));
+      if (iter.valid()) {
+        binary::Input key(byteRange(iter.key()));
         auto unit = key.trustedNat();
-        const auto val = iter->value();
-        iter->Next();
+        const auto val = iter.value();
+        iter.next();
         return rts::OwnershipUnit{
             static_cast<uint32_t>(unit),
-            {reinterpret_cast<const OwnershipUnit::Ids*>(val.data()),
-             val.size() / sizeof(OwnershipUnit::Ids)}};
+            {reinterpret_cast<const OwnershipUnit::Ids*>(val.mv_data),
+             val.mv_size / sizeof(OwnershipUnit::Ids)}};
       } else {
         return {};
       }
     }
 
-    std::unique_ptr<rocksdb::Iterator> iter;
+    Txn txn;
+    Cursor iter;
   };
-  std::unique_ptr<rocksdb::Iterator> iter(container_.db->NewIterator(
-      rocksdb::ReadOptions(), container_.family(Family::ownershipRaw)));
 
-  if (!iter) {
-    rts::error("rocksdb: couldn't allocate ownership unit iterator");
-  }
-
-  iter->SeekToFirst();
-  return std::make_unique<UnitIterator>(std::move(iter));
+  return std::make_unique<UnitIterator>(container_);
 }
 
 void DatabaseImpl::storeOwnership(ComputedOwnership& ownership) {
   container_.requireOpen();
 
+#ifdef LATER
   if (ownership.sets_.size() > 0) {
     auto t = makeAutoTimer("storeOwnership(sets)");
     rocksdb::WriteBatch batch;
@@ -463,6 +491,7 @@ void DatabaseImpl::storeOwnership(ComputedOwnership& ownership) {
             << " intervals";
     check(container_.db->Write(container_.writeOptions, &batch));
   }
+#endif
 }
 
 namespace {
@@ -491,6 +520,7 @@ struct StoredOwnership : Ownership {
   }
 
   folly::Optional<SetExpr<SetU32>> getUset(UsetId id) override {
+#ifdef LATER
     rocksdb::PinnableSlice val;
     EncodedNat key(id);
     auto s = db_->container_.db->Get(
@@ -508,6 +538,9 @@ struct StoredOwnership : Ownership {
     } else {
       return folly::none;
     }
+#else
+    return folly::none;
+#endif
   }
 
   std::unique_ptr<rts::OwnershipSetIterator> getSetIterator() override {
@@ -519,6 +552,7 @@ struct StoredOwnership : Ownership {
   }
 
   UnitId nextUnitId() {
+#ifdef LATER
     std::unique_ptr<rocksdb::Iterator> iter(db_->container_.db->NewIterator(
         rocksdb::ReadOptions(),
         db_->container_.family(Family::ownershipUnitIds)));
@@ -538,9 +572,13 @@ struct StoredOwnership : Ownership {
     }
 
     return max_unit_id;
+#else
+    return 0;
+#endif
   }
 
   OwnershipStats getStats() override {
+#ifdef LATER
     rocksdb::Range range(toSlice(""), toSlice("\xff"));
     uint64_t units_size, unit_ids_size, sets_size, owners_size, num_owners,
         owner_pages_size, num_owner_pages;
@@ -594,6 +632,9 @@ struct StoredOwnership : Ownership {
     stats.num_orphan_facts = orphans ? *orphans : -1;
 
     return stats;
+#else
+    return {};
+#endif
   }
 
  private:
@@ -616,6 +657,7 @@ void DatabaseImpl::prepareFactOwnerCache() {
 }
 
 UsetId DatabaseImpl::getOwner(Id id) {
+#ifdef LATER
   auto cached = factOwnerCache_.getOwner(container_, id);
 
   if (cached) {
@@ -634,6 +676,9 @@ UsetId DatabaseImpl::getOwner(Id id) {
       return INVALID_USET;
     }
   }
+#else
+  return INVALID_USET;
+#endif
 }
 
 namespace {
@@ -650,6 +695,7 @@ static const uint64_t PAGE_MASK = (1 << PAGE_BITS) - 1;
 } // namespace
 
 void DatabaseImpl::FactOwnerCache::enable(ContainerImpl& container) {
+#ifdef LATER
   auto cache = cache_.ulock();
   if (*cache) {
     return;
@@ -685,12 +731,14 @@ void DatabaseImpl::FactOwnerCache::enable(ContainerImpl& container) {
 
   auto wcache = cache.moveFromUpgradeToWrite();
   *wcache = std::make_unique<Cache>(std::move(content));
+#endif
 }
 
 std::unique_ptr<DatabaseImpl::FactOwnerCache::Page>
 DatabaseImpl::FactOwnerCache::readPage(
     ContainerImpl& container,
     uint64_t prefix) {
+#ifdef LATER
   rocksdb::PinnableSlice val;
   auto s = container.db->Get(
       rocksdb::ReadOptions(),
@@ -714,6 +762,9 @@ DatabaseImpl::FactOwnerCache::readPage(
   std::copy(sets, sets + num, p->setIds.data());
 
   return p;
+#else
+  return {};
+#endif
 }
 
 UsetId DatabaseImpl::FactOwnerCache::lookup(
@@ -815,6 +866,7 @@ std::optional<UsetId> DatabaseImpl::FactOwnerCache::getOwner(
 void DatabaseImpl::FactOwnerCache::prepare(ContainerImpl& container) {
   auto t = makeAutoTimer("prepareFactOwnerCache");
 
+#ifdef LATER
   std::unique_ptr<rocksdb::Iterator> iter(container.db->NewIterator(
       rocksdb::ReadOptions(), container.family(Family::factOwners)));
 
@@ -907,6 +959,7 @@ void DatabaseImpl::FactOwnerCache::prepare(ContainerImpl& container) {
       toSlice(orphaned));
 
   check(container.db->Write(container.writeOptions, &batch));
+#endif
 }
 
 // Called once per batch. Can't be run in parallel.
@@ -918,6 +971,7 @@ void DatabaseImpl::addDefineOwnership(DefineOwnership& def) {
   auto t = makeAutoTimer("addDefineOwnership");
   container_.requireOpen();
 
+#ifdef LATER
   VLOG(1) << "addDefineOwnership: " << def.usets_.size() << " sets";
 
   // add new owner sets
@@ -1038,6 +1092,7 @@ void DatabaseImpl::addDefineOwnership(DefineOwnership& def) {
             << pred.ids_.size() + pred.new_ids_.size() << " entries for pid "
             << pid.toWord();
   }
+#endif
 }
 
 } // namespace impl

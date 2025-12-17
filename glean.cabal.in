@@ -332,7 +332,7 @@ library rts
     import: fb-haskell, fb-cpp, deps, folly
     visibility: public
     include-dirs: .
-    CXX_LIB_glean_cpp_rts
+    CXX_LIB_glean_cpp_rts HSfolly-clib-20251206.1815-inplace
     install-includes:
         glean/bytecode/evaluate.h
         glean/bytecode/instruction.h
@@ -392,7 +392,7 @@ library rocksdb
         glean/rocksdb/ffi.h
         glean/rocksdb/rocksdb.h
         glean/rocksdb/util.h
-    pkgconfig-depends: rocksdb, fmt
+    pkgconfig-depends: fmt
     build-depends:
         glean:rocksdb-stats,
         glean:rts,
