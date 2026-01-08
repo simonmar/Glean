@@ -348,8 +348,8 @@ install::
 
 DBROOT=--service localhost:25052
 # DBROOT=--db-root DIR --schema SCHEMA
-GLEAN:=$(shell cabal list-bin exe:glean)
-HIE:=$(shell cabal list-bin hie-indexer)
+GLEAN=$(shell cabal list-bin exe:glean)
+HIE=$(shell cabal list-bin hie-indexer)
 STACKAGE_SRC=$$HOME/code/stackage
 
 STACKAGE_DB=stackage/4
