@@ -345,7 +345,7 @@ library rts
     import: fb-haskell, fb-cpp, deps, folly
     visibility: public
     include-dirs: .
-    CXX_LIB_glean_cpp_rts
+    CXX_LIB_glean_cpp_rts HSfolly-clib-20251206.1815-inplace
     install-includes:
         glean/bytecode/evaluate.h
         glean/bytecode/instruction.h
