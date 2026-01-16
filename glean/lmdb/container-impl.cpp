@@ -74,7 +74,9 @@ ContainerImpl::ContainerImpl(
   MDB_env *db_ptr;
   check( mdb_env_create(&db_ptr) );
   check( mdb_env_set_maxdbs(db_ptr, Family::count()) );
-  check( mdb_env_set_mapsize(db_ptr, 10*1024*1024*1024UL) );
+  check( mdb_env_set_mapsize(
+             db_ptr,
+             m == Mode::ReadOnly ? 1 : 1024*1024*1024*1024UL) );
   check( mdb_env_open(db_ptr, path.c_str(), flags, 0666) );
   SCOPE_FAIL { mdb_env_close(db_ptr); };
 
